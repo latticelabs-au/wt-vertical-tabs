@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/latticelabs-au/wt-vertical-tabs/discussions
+    about: Ask questions, share ideas, or discuss wt-vertical-tabs behaviour before opening an issue.
+  - name: Vertical tabs in Windows Terminal itself
+    url: https://github.com/microsoft/terminal/issues/835
+    about: The upstream feature request for native vertical tabs in Windows Terminal.

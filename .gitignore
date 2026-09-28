@@ -1,0 +1,10 @@
+# Compiled mods, if built with --out build
+build/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local test captures (the README screenshots in docs/images are kept)
+*.png
+!docs/images/*.png

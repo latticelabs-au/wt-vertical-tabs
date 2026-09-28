@@ -1,0 +1,36 @@
+version: 2
+
+# Weekly on Monday, matching the org's Monday freshness cadence.
+#
+# The mod has no package dependencies (Windhawk supplies the toolchain and
+# headers), so the only thing to keep fresh is the set of workflow actions.
+# Minor and patch updates are grouped into a single pull request; major updates
+# are left ungrouped, because each one is a behaviour change that deserves its
+# own pull request, its own CI run and its own decision.
+#
+# The commit prefix is `ci`, following Conventional Commits as defined in the
+# house style. No scope is set, because Dependabot would emit `deps`, which is
+# not in the repository's fixed scope list.
+
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Australia/Melbourne
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

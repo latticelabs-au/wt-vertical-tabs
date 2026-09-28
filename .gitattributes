@@ -1,0 +1,28 @@
+# Default: normalise line endings to CRLF on checkout (Windows repo).
+# text=auto lets Git detect text vs binary; eol=crlf sets the checkout
+# line ending for all detected text files.
+* text=auto eol=crlf
+
+# ── Unix line endings ─────────────────────────────────────────────────────────
+# The mod keeps LF: Windhawk mods are LF by convention and the file is pasted
+# into the Windhawk editor as is. YAML, Python and shell keep LF on every
+# platform; CRLF in a shell script breaks the shebang line in any POSIX shell,
+# including Git Bash on Windows.
+*.cpp  text eol=lf
+*.py   text eol=lf
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# ── Binary assets: no line-ending normalisation, no diff ─────────────────────
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+
+# ── Linguist overrides ────────────────────────────────────────────────────────
+# The mod is the product; the Python build script is tooling.
+*.py linguist-detectable=false
+
+# Markdown documentation is documentation, not application code.
+*.md linguist-documentation=true

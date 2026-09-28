@@ -1,0 +1,171 @@
+name: release
+
+# Publishes a wt-vertical-tabs release. The deliverable of a Windhawk mod is its
+# source: Windhawk compiles it on the user's machine, so a release carries the
+# mod file itself plus SHA256SUMS.txt, and no binaries. The mod is compiled here
+# for both architectures first, so a tag that does not compile cannot become a
+# release.
+#
+# The release is created as a DRAFT: nothing ships until a human has read the
+# notes and pressed publish.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "semver without the leading v, for example 1.2.0"
+        required: true
+        type: string
+
+# Read only by default. Write access to contents is granted to the release job
+# alone, which is the only job that mutates the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WINDHAWK_VERSION: v1.7.3
+
+jobs:
+  release:
+    name: compile and draft the release
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The dispatch input is read through the environment rather than
+      # interpolated into the script body, so it cannot inject shell.
+      - name: Resolve the version
+        id: version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Version '${version}' is not semver. Tag the commit as v1.2.3, or pass 1.2.3 to workflow_dispatch."
+            exit 1
+          fi
+
+          # The tag and the @version in the mod's metadata must agree, or
+          # Windhawk shows users a version that does not match the release.
+          # sed, not grep -P: Git Bash's grep rejects -P on the Windows runners.
+          declared="$(sed -n 's|^// @version[[:space:]]*\([^[:space:]]*\).*|\1|p' windows-terminal-vertical-tabs.wh.cpp | head -n1)"
+          if [ "$declared" != "$version" ]; then
+            echo "::error file=windows-terminal-vertical-tabs.wh.cpp::The mod declares @version ${declared}, but the release is ${version}. Bump the @version line before tagging."
+            exit 1
+          fi
+
+          case "$version" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the Windhawk toolchain
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $env:WINDHAWK_VERSION --repo ramensoftware/windhawk --pattern windhawk_setup_offline.exe --dir $env:RUNNER_TEMP
+          7z x -y "-o$env:RUNNER_TEMP\wh" "$env:RUNNER_TEMP\windhawk_setup_offline.exe" | Out-Null
+          $root = "$env:RUNNER_TEMP\windhawk"
+          New-Item -ItemType Directory -Force "$root\Engine" | Out-Null
+          Move-Item "$env:RUNNER_TEMP\wh\Compiler" "$root\Compiler"
+          Move-Item "$env:RUNNER_TEMP\wh\Engine\`$R1" "$root\Engine\current"
+          Set-Content -Encoding ascii "$root\windhawk.ini" "[Storage]`r`nPortable=1`r`nAppDataPath=AppData`r`nEnginePath=Engine\current`r`nCompilerPath=Compiler`r`nUIPath=UI`r`n"
+          "WINDHAWK_ROOT=$root" >> $env:GITHUB_ENV
+
+      - name: Compile the mod (x86-64, arm64)
+        run: python tools/build.py --windhawk "$env:WINDHAWK_ROOT"
+
+      # sha256sum -c compatible: lowercase hash, two spaces, file name, LF.
+      - name: Stage the release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp windows-terminal-vertical-tabs.wh.cpp dist/
+          (cd dist && sha256sum windows-terminal-vertical-tabs.wh.cpp > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Build the release body from CHANGELOG.md
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          awk -v want="## [${VERSION}]" '
+            index($0, want) == 1 { inSection = 1; next }
+            inSection && /^## \[/ { exit }
+            inSection && /^---$/ { exit }
+            inSection { print }
+          ' CHANGELOG.md > section.md
+
+          sed -i '/./,$!d' section.md
+          if ! grep -q '[^[:space:]]' section.md; then
+            echo "::error file=CHANGELOG.md::No CHANGELOG.md section was found for version ${VERSION}. Add a '## [${VERSION}] - YYYY-MM-DD' section before tagging the release."
+            exit 1
+          fi
+
+          {
+            cat section.md
+            cat <<'MD'
+
+          ## Installing
+
+          1. Install [Windhawk](https://windhawk.net) 1.7 or later.
+          2. In Windhawk, choose **Create a New Mod**, replace the template with the contents of `windows-terminal-vertical-tabs.wh.cpp` from this release, and click **Compile Mod**.
+          3. In Windows Terminal, right-click any tab and choose **Turn on vertical tabs**.
+
+          Windhawk compiles the mod on your machine; there is no binary in this release. `SHA256SUMS.txt` lets you check the file you downloaded: `Get-FileHash .\windows-terminal-vertical-tabs.wh.cpp -Algorithm SHA256`, compared case insensitively.
+          MD
+          } > release-notes.md
+
+          echo "Release body:"
+          cat release-notes.md
+
+      - name: Create the draft GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          args=(
+            "$TAG"
+            --draft
+            --title "wt-vertical-tabs $TAG"
+            --notes-file release-notes.md
+            --target "$GITHUB_SHA"
+          )
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}" dist/*
+          echo "Draft release ${TAG} created. Review it and publish it manually."

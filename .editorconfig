@@ -1,0 +1,36 @@
+# root = true stops editors from searching parent directories for further
+# .editorconfig files. Every rule in this file is therefore absolute.
+root = true
+
+# ── All files ─────────────────────────────────────────────────────────────────
+[*]
+charset                  = utf-8
+insert_final_newline     = true
+trim_trailing_whitespace = true
+indent_style             = space
+indent_size              = 4
+end_of_line              = crlf
+
+# ── C++: the mod and the test harness ─────────────────────────────────────────
+# Windhawk mods are conventionally LF and four-space indented; the mod file is
+# also what gets pasted into the Windhawk editor, so keep it LF on every OS.
+[*.cpp]
+end_of_line = lf
+indent_size = 4
+
+# ── YAML, Python and shell scripts ────────────────────────────────────────────
+# LF line endings regardless of platform, matching the .gitattributes eol=lf
+# rules for these extensions.
+[*.{yml,yaml,sh}]
+end_of_line = lf
+indent_size = 2
+
+[*.py]
+end_of_line = lf
+indent_size = 4
+
+# ── Markdown: two trailing spaces are a deliberate line break in CommonMark. ──
+# Stripping them would silently alter rendered output.
+[*.md]
+trim_trailing_whitespace = false
+indent_size              = 2

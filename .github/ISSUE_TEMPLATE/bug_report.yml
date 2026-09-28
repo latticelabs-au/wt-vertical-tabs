@@ -1,0 +1,114 @@
+name: Bug report
+description: Report incorrect or unexpected behaviour in wt-vertical-tabs.
+title: "[BUG]: "
+labels: ["bug"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing a bug, check [Discussions](https://github.com/latticelabs-au/wt-vertical-tabs/discussions)
+        and existing issues to see whether it has already been reported.
+
+  - type: input
+    id: mod-version
+    attributes:
+      label: wt-vertical-tabs version
+      description: The version shown for the mod in Windhawk.
+      placeholder: "e.g. 1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: terminal-version
+    attributes:
+      label: Windows Terminal version
+      description: Settings, then About, in Windows Terminal. Say whether it is the Store, Preview, Canary or a portable build.
+      placeholder: "e.g. 1.24.11911.0 (Store)"
+    validations:
+      required: true
+
+  - type: input
+    id: windhawk-version
+    attributes:
+      label: Windhawk version
+      placeholder: "e.g. 1.7.3"
+    validations:
+      required: true
+
+  - type: input
+    id: windows-build
+    attributes:
+      label: Windows build number
+      description: Run `winver` and paste the full build string shown.
+      placeholder: "Version 24H2 (OS Build 26100.xxxx)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: titlebar
+    attributes:
+      label: Is "Show tabs in title bar" on in Terminal's settings?
+      options:
+        - "On"
+        - "Off"
+        - "Unsure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: state
+    attributes:
+      label: Sidebar state when the problem happens
+      options:
+        - "Vertical, expanded"
+        - "Vertical, collapsed"
+        - "Horizontal (vertical tabs turned off)"
+        - "While toggling or collapsing"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include screenshots if the layout looks wrong.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Windows Terminal with three tabs
+        2. Right-click a tab, Turn on vertical tabs
+        3. Observe that ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Windhawk log
+      description: >
+        In Windhawk, open the mod, enable logging under Advanced, reproduce the problem, then paste
+        the lines from the log for WindowsTerminal.exe. Otherwise leave blank.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Other Windhawk mods targeting Windows Terminal, multiple windows, elevated windows, and so on.
+    validations:
+      required: false

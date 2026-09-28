@@ -1,0 +1,116 @@
+name: ci
+
+# Build gate for wt-vertical-tabs. Two independent jobs so a contributor sees
+# every failure in one run: a compile break and a prose break are reported
+# separately rather than short circuiting each other.
+#
+# Both jobs run on windows-latest. The mod is compiled with Windhawk's own
+# Windows toolchain (LLVM MinGW, shipped inside the Windhawk installer), which
+# only runs on Windows. The prose gate is pure text and could run cheaper on
+# ubuntu-latest, but keeping it on the same runner means contributors debug one
+# environment instead of two.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Windhawk release whose toolchain compiles the mod. The same compiler
+  # invocation is reproduced by tools/build.py.
+  WINDHAWK_VERSION: v1.7.3
+
+jobs:
+  compile:
+    name: compile (x86-64, arm64)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The offline installer is an NSIS archive: 7-Zip extracts the compiler
+      # and engine libraries without installing anything, and a portable
+      # windhawk.ini tells tools/build.py where they are.
+      - name: Fetch the Windhawk toolchain
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $env:WINDHAWK_VERSION --repo ramensoftware/windhawk --pattern windhawk_setup_offline.exe --dir $env:RUNNER_TEMP
+          7z x -y "-o$env:RUNNER_TEMP\wh" "$env:RUNNER_TEMP\windhawk_setup_offline.exe" | Out-Null
+          $root = "$env:RUNNER_TEMP\windhawk"
+          New-Item -ItemType Directory -Force "$root\Engine" | Out-Null
+          Move-Item "$env:RUNNER_TEMP\wh\Compiler" "$root\Compiler"
+          Move-Item "$env:RUNNER_TEMP\wh\Engine\`$R1" "$root\Engine\current"
+          Set-Content -Encoding ascii "$root\windhawk.ini" "[Storage]`r`nPortable=1`r`nAppDataPath=AppData`r`nEnginePath=Engine\current`r`nCompilerPath=Compiler`r`nUIPath=UI`r`n"
+          "WINDHAWK_ROOT=$root" >> $env:GITHUB_ENV
+
+      - name: Compile the mod
+        run: python tools/build.py --windhawk "$env:WINDHAWK_ROOT"
+
+      - name: Compile the mod with test hooks
+        run: python tools/build.py --windhawk "$env:WINDHAWK_ROOT" --arch x86-64 --define WTVT_TEST_HOOKS
+
+      - name: Compile the test harness
+        run: python tools/build.py --windhawk "$env:WINDHAWK_ROOT" --source tools/test-harness.wh.cpp
+
+  prose:
+    name: prose (em dash gate)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      # POLICY versus ENFORCEMENT, which are two different things.
+      # The house rule bans U+2014 in every tracked file. This job enforces that
+      # rule for Markdown and the docs tree only. Source code and commit
+      # messages are caught in review, not here.
+      - name: Forbid the em dash in Markdown and docs
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          # git grep exit codes: 0 means matches were found, 1 means none were
+          # found (the passing case), anything above 1 is a real failure. Guard
+          # all three, otherwise a broken grep would silently pass the gate.
+          set +e
+          matches="$(git grep -n -I -P '\x{2014}' -- '*.md' 'docs/**')"
+          status=$?
+          set -e
+
+          if [ "$status" -gt 1 ]; then
+            echo "::error::The em dash gate failed to run (git grep exited ${status}). This is a CI fault, not an authoring fault."
+            exit 1
+          fi
+
+          if [ "$status" -eq 1 ]; then
+            echo "No em dash found in Markdown or docs."
+            exit 0
+          fi
+
+          while IFS= read -r hit; do
+            [ -n "$hit" ] || continue
+            file="${hit%%:*}"
+            rest="${hit#*:}"
+            lineno="${rest%%:*}"
+            echo "::error file=${file},line=${lineno}::${file} line ${lineno} contains U+2014 EM DASH, which is banned in this repository. Rewrite the sentence with a colon, a comma pair, parentheses, or two sentences."
+          done <<< "$matches"
+
+          echo "::error::Em dash gate failed. Every file listed above must be rewritten before this pull request can merge."
+          exit 1

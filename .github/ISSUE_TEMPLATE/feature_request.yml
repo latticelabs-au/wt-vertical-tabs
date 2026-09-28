@@ -1,0 +1,47 @@
+name: Feature request
+description: Suggest a new feature or improvement to wt-vertical-tabs.
+title: "[FEATURE]: "
+labels: ["enhancement"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing a request, check [Discussions](https://github.com/latticelabs-au/wt-vertical-tabs/discussions)
+        and existing issues to see whether it has already been proposed.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: >
+        Describe the situation where the current behaviour falls short. Be specific: what
+        were you trying to do and what stopped you?
+      placeholder: "When I have X tabs open, the sidebar does Y, but I need Z because ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: >
+        Describe what you would like the sidebar to do instead. Browser behaviour (Edge, Firefox,
+        Vivaldi vertical tabs) is a useful reference if it shows what you mean.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Screenshots, mock-ups, or links to how other terminals or browsers handle it.
+    validations:
+      required: false
