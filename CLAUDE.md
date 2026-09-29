@@ -29,7 +29,9 @@ into the Windhawk editor. Do not split it.
 ### Map of the mod file, top to bottom
 
 1. `==WindhawkMod==`, `==WindhawkModReadme==`, `==WindhawkModSettings==` blocks.
-2. Settings and global state (`g_vertical`, `g_collapsed` are the persisted toggles).
+2. Settings and global state (`g_vertical` is the persisted toggle; `g_collapsed` is the
+   collapsed state new windows start in, the last one chosen; each window's own is
+   `WindowState::collapsed`).
 3. XAML strings: the vertical `ItemsPanelTemplate` and the tab (`TabViewItem`) template.
 4. Visual tree helpers.
 5. `WindowState` and `ThreadContext`, `SetValueSaved` / `RestoreSavedValues`.
@@ -38,8 +40,9 @@ into the Windhawk editor. Do not split it.
 8. The vertical strip: `ApplyVerticalStrip` / `RemoveVerticalStrip`, the new-tab button, the
    collapse button, `ReassertVerticalStrip`.
 9. Layout: `ApplySidebarLayout`, `TrackWindow`, `ApplyLayout`, `RemoveLayout`, `UntrackWindow`,
-   `RefreshCurrentThread`.
-10. Deferred work (`RunPendingWork`, `QueueWork`, `RequestToggle`) and the `WTVT_TEST_HOOKS` seam.
+   `RefreshWindow`, `RefreshCurrentThread`.
+10. Deferred work (`RunPendingWork`, `QueueWork`, `RequestToggleVertical`,
+    `RequestToggleCollapsed`) and the `WTVT_TEST_HOOKS` seam.
 11. XAML Diagnostics: TAP, `VisualTreeWatcher`, burst attach and detach, handle release queue.
 12. Running code on a window's UI thread, per-thread teardown.
 13. `CreateWindowExW` hook and the Windhawk entry points.

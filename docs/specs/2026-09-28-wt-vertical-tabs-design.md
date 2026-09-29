@@ -1,6 +1,6 @@
 # wt-vertical-tabs design
 
-Date: 2026-09-28. Status: shipped as 1.0.0.
+Date: 2026-09-28. Status: shipped as 1.0.0; per-window collapse in 1.0.1.
 
 ## Problem
 
@@ -15,7 +15,8 @@ already use.
 
 - Browser-style vertical tabs in stock Windows Terminal 1.24, turned on and off from the tab
   context menu the way Edge does it, horizontal by default, the choice remembered.
-- A collapsed icon rail, toggled from a button at the top of the sidebar.
+- A collapsed icon rail, toggled from a button at the top of the sidebar, for that window only.
+  New windows, and every window after a restart, start the way the last one was left.
 - Everything Terminal already does with tabs keeps working.
 - Fully reversible, live: toggling, settings changes and disabling the mod never need a restart,
   and turning it off restores the stock layout exactly.

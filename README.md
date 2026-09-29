@@ -34,8 +34,10 @@ works on Terminal's live interface, in memory, while it runs.
 - **Edge-style toggle.** "Turn on vertical tabs" and "Turn off vertical tabs" sit in every tab's
   context menu, in a group of their own above Close. Horizontal stays the default, and the choice is
   remembered across restarts.
-- **Collapsible sidebar.** The pane button at the top of the sidebar collapses it to a 48 px icon rail
-  and expands it again. Titles stay available as tooltips. Also remembered.
+- **Collapsible sidebar, per window.** The pane button at the top of the sidebar collapses that
+  window's sidebar to a 48 px icon rail and expands it again; other windows stay as they are. Titles
+  stay available as tooltips. New windows, and every window after a restart (or after the mod is
+  disabled and enabled again), start the way you last left one.
 - **Terminal keeps working as before.** Tab colours, renaming, the tab context menu, the new-tab
   dropdown (it opens upwards from the foot of the sidebar), focus mode, full screen, multiple windows,
   light and dark themes.
@@ -85,8 +87,8 @@ Open the mod's **Settings** tab in Windhawk.
 | `position` | `left` or `right` | `left` | Which side of the window the sidebar sits on. Right suits people who keep their shell prompt's attention on the left edge. |
 
 Whether vertical tabs are on, and whether the sidebar is collapsed, are deliberately not settings.
-They follow the context menu toggle and the collapse button, the same way a browser remembers them,
-and are kept in the mod's own storage.
+They follow the context menu toggle (for every window) and each window's collapse button, the same
+way a browser remembers them, and are kept in the mod's own storage.
 
 ---
 
@@ -140,7 +142,7 @@ every handler the mod adds is removed on the UI thread that owns it.
 |--------|--------|
 | Right-click a tab, **Turn on vertical tabs** | Tabs move into the sidebar. |
 | Right-click a tab, **Turn off vertical tabs** | Terminal's own horizontal strip, exactly as before. |
-| Pane button at the top of the sidebar | Collapse to the icon rail, or expand again. |
+| Pane button at the top of the sidebar | Collapse this window's sidebar to the icon rail, or expand it again. |
 | Hover a tab in the collapsed rail | Its title, as a tooltip. |
 | Dropdown arrow next to **+** | Terminal's new-tab menu, opening upwards. The collapsed rail keeps only **+**. |
 

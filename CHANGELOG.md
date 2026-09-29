@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-29
+
+### Fixed
+
+- Collapsing or expanding the sidebar now affects only the window whose button was clicked, not
+  every Terminal window. New windows, and every window after a restart, start collapsed or
+  expanded the way the last one was left.
+
 ## [1.0.0] - 2026-09-28
 
 ### Added
@@ -26,5 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/latticelabs-au/wt-vertical-tabs/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/latticelabs-au/wt-vertical-tabs/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/latticelabs-au/wt-vertical-tabs/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/latticelabs-au/wt-vertical-tabs/releases/tag/v1.0.0

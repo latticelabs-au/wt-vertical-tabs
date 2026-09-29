@@ -2,7 +2,7 @@
 // @id              windows-terminal-vertical-tabs
 // @name            Windows Terminal Vertical Tabs
 // @description     Browser-style vertical tabs for Windows Terminal, toggled from any tab's right-click menu
-// @version         1.0.0
+// @version         1.0.1
 // @author          Lattice Labs
 // @github          https://github.com/addievo
 // @homepage        https://github.com/latticelabs-au/wt-vertical-tabs
@@ -33,9 +33,11 @@ until you ask for vertical ones.
 - **Turn it on:** right-click any tab and choose **Turn on vertical tabs**.
 - **Turn it off:** right-click any tab and choose **Turn off vertical tabs**.
 - **Collapse or expand:** the pane button at the top of the sidebar. Collapsed,
-  the sidebar is a narrow rail of tab icons; hover one for its title.
+  the sidebar is a narrow rail of tab icons; hover one for its title. Each
+  window collapses on its own.
 
-Both choices are remembered across restarts.
+Both choices are remembered across restarts. New windows, and every window
+after a restart, start collapsed or expanded the way you last left one.
 
 ## Settings
 
@@ -124,9 +126,11 @@ constexpr int kMaxSidebarWidth = 600;
 std::atomic<int> g_sidebarWidth{220};
 std::atomic<bool> g_sidebarOnRight{false};
 
-// The user's layout choice, toggled from a tab's context menu and the
-// sidebar's collapse button, and kept in the mod's storage between sessions.
-// Horizontal (Windows Terminal's own layout) until turned on.
+// The user's layout choice, toggled from a tab's context menu, and kept in the
+// mod's storage between sessions. Horizontal (Windows Terminal's own layout)
+// until turned on. Collapsing is per window (WindowState::collapsed); this is
+// the state a new window starts in: the one last chosen in any window, also
+// kept between sessions.
 constexpr double kCollapsedWidth = 48;
 std::atomic<bool> g_vertical{false};
 std::atomic<bool> g_collapsed{false};
@@ -584,6 +588,8 @@ struct WindowState {
     // next toggle or settings change: retrying on every tab row sighting would
     // move the row back and forth, and each move is another sighting.
     bool stripFailed = false;
+    // Collapsed to the icon rail, by this window's own collapse button.
+    bool collapsed = false;
 
     // Set when "Show tabs in title bar" is on: the title bar presenter the tab
     // row was taken from, and the title bar itself, whose background the
@@ -651,7 +657,8 @@ struct ThreadContext {
     winrt::event_token workTimerToken{};
     std::vector<winrt::weak_ref<wuxc::ContentPresenter>> pendingTabRows;
     bool pendingToggleVertical = false;
-    bool pendingToggleCollapsed = false;
+    // The TabViews whose collapse button was clicked.
+    std::vector<winrt::weak_ref<muxc::TabView>> pendingCollapseToggles;
     bool pendingMenuSweep = false;
     bool pendingTemplateRetry = false;
 
@@ -762,8 +769,8 @@ void RestoreSavedValues(WindowState& window) {
     window.savedValues.clear();
 }
 
-double SidebarWidth() {
-    return g_collapsed ? kCollapsedWidth : g_sidebarWidth.load();
+double SidebarWidth(WindowState const& window) {
+    return window.collapsed ? kCollapsedWidth : g_sidebarWidth.load();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -887,12 +894,34 @@ bool ValidateTabViewItemTemplate(muxc::TabView const& tabView,
     return false;
 }
 
-// The template tabs should have right now, or null for the stock one.
-wuxc::ControlTemplate CurrentTabTemplate(ThreadContext& context) {
-    if (g_collapsed) {
+// The template a window's tabs should have right now, or null for the stock one.
+wuxc::ControlTemplate CurrentTabTemplate(ThreadContext& context, WindowState const& window) {
+    if (window.collapsed) {
         return context.collapsedTabTemplateValidated ? context.collapsedTabTemplate : nullptr;
     }
     return context.tabTemplateValidated ? context.tabTemplate : nullptr;
+}
+
+// Whether the window's template has yet to be tried (it needs a tab to try it on).
+bool CurrentTabTemplateUntried(ThreadContext& context, WindowState const& window) {
+    return window.collapsed
+               ? context.collapsedTabTemplate && !context.collapsedTabTemplateValidated
+               : context.tabTemplate && !context.tabTemplateValidated;
+}
+
+// Tries the window's template on one of its tabs if that hasn't happened yet on
+// this thread, then gives every tab of the window the template to use.
+void ApplyCurrentTabTemplate(ThreadContext& context,
+                             WindowState const& window,
+                             muxc::TabView const& tabView) {
+    bool usable = window.collapsed
+                      ? ValidateTabViewItemTemplate(tabView, context.collapsedTabTemplate,
+                                                    context.collapsedTabTemplateValidated)
+                      : ValidateTabViewItemTemplate(tabView, context.tabTemplate,
+                                                    context.tabTemplateValidated);
+    if (usable) {
+        SetAllTabViewItemTemplates(tabView, CurrentTabTemplate(context, window));
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -900,7 +929,7 @@ wuxc::ControlTemplate CurrentTabTemplate(ThreadContext& context) {
 
 constexpr wchar_t kMenuTag[] = L"windows-terminal-vertical-tabs";
 
-void RequestToggle(bool collapse);
+void RequestToggleVertical();
 
 PCWSTR MenuEntryText() {
     return g_vertical ? L"Turn off vertical tabs" : L"Turn on vertical tabs";
@@ -954,7 +983,7 @@ void AddMenuEntry(WindowState& window, muxc::TabViewItem const& tab) {
     menuItem.Tag(winrt::box_value(kMenuTag));
     LabelMenuEntry(menuItem);
     auto clickToken = menuItem.Click([](wf::IInspectable const&, wux::RoutedEventArgs const&) {
-        RequestToggle(false);
+        RequestToggleVertical();
     });
 
     items.InsertAt(insertAt, menuItem);
@@ -1099,7 +1128,7 @@ void PlaceNewTabFlyout(WindowState& window) {
 // In the collapsed rail the split button keeps its "+" and drops the dropdown
 // arrow, which the rail has no room for; expanding brings it back.
 void FitNewTabButton(WindowState& window, muxc::SplitButton const& button) {
-    if (!g_collapsed || wuxm::VisualTreeHelper::GetChildrenCount(button) == 0) {
+    if (!window.collapsed || wuxm::VisualTreeHelper::GetChildrenCount(button) == 0) {
         return;
     }
     auto root = wuxm::VisualTreeHelper::GetChild(button, 0).try_as<wuxc::Grid>();
@@ -1206,6 +1235,8 @@ constexpr std::wstring_view kCollapseButtonXaml = LR"(
 </Button>
 )";
 
+void RequestToggleCollapsed(winrt::weak_ref<muxc::TabView> const& tabView);
+
 void AddCollapseButton(WindowState& window, wuxc::Grid const& containerGrid) {
     if (window.collapseButton.get()) {
         return;
@@ -1215,18 +1246,21 @@ void AddCollapseButton(WindowState& window, wuxc::Grid const& containerGrid) {
         return;
     }
     button.Content(winrt::box_value(g_sidebarOnRight ? L"\xE90D" : L"\xE90C"));
-    button.HorizontalAlignment(g_collapsed ? wux::HorizontalAlignment::Center
-                                           : (g_sidebarOnRight ? wux::HorizontalAlignment::Right
-                                                               : wux::HorizontalAlignment::Left));
-    button.Margin(g_collapsed ? wux::Thickness{0, 4, 0, 0} : wux::Thickness{8, 4, 8, 0});
-    PCWSTR label = g_collapsed ? L"Expand tabs" : L"Collapse tabs";
+    button.HorizontalAlignment(window.collapsed
+                                   ? wux::HorizontalAlignment::Center
+                                   : (g_sidebarOnRight ? wux::HorizontalAlignment::Right
+                                                       : wux::HorizontalAlignment::Left));
+    button.Margin(window.collapsed ? wux::Thickness{0, 4, 0, 0} : wux::Thickness{8, 4, 8, 0});
+    PCWSTR label = window.collapsed ? L"Expand tabs" : L"Collapse tabs";
     wuxc::ToolTipService::SetToolTip(button, winrt::box_value(label));
     wux::Automation::AutomationProperties::SetName(button, label);
     wuxc::Grid::SetRow(button, 0);
 
+    // Collapses this window only.
     window.collapseButtonClickToken =
-        button.Click([](wf::IInspectable const&, wux::RoutedEventArgs const&) {
-            RequestToggle(true);
+        button.Click([tabView = window.tabView](wf::IInspectable const&,
+                                                wux::RoutedEventArgs const&) {
+            RequestToggleCollapsed(tabView);
         });
     containerGrid.Children().Append(button);
     window.collapseButton = winrt::make_weak(button);
@@ -1320,7 +1354,7 @@ bool ApplyVerticalStrip(ThreadContext& context,
     // viewer and items presenter exist for the lookups below.
     listView.ApplyTemplate();
 
-    double width = SidebarWidth();
+    double width = SidebarWidth(window);
 
     // The template's two rows are the strip and the (unused) tab content;
     // the strip takes the height.
@@ -1372,10 +1406,10 @@ bool ApplyVerticalStrip(ThreadContext& context,
             SetValueSaved(window, element, wux::FrameworkElement::MinWidthProperty(),
                           winrt::box_value(width));
             SetValueSaved(window, element, wux::FrameworkElement::MarginProperty(),
-                          winrt::box_value(g_collapsed ? wux::Thickness{0, 0, 0, 4}
+                          winrt::box_value(window.collapsed ? wux::Thickness{0, 0, 0, 4}
                                                        : wux::Thickness{4, 0, 4, 4}));
             SetValueSaved(window, element, wuxc::ContentPresenter::HorizontalContentAlignmentProperty(),
-                          winrt::box_value(g_collapsed ? wux::HorizontalAlignment::Center
+                          winrt::box_value(window.collapsed ? wux::HorizontalAlignment::Center
                                                        : wux::HorizontalAlignment::Stretch));
             // UpdateTabWidths reads the footer's desired size from inside
             // TabView::MeasureOverride, before the footer is measured again,
@@ -1464,14 +1498,7 @@ bool ApplyVerticalStrip(ThreadContext& context,
 
     window.stripApplied = true;
 
-    bool usable = g_collapsed
-                      ? ValidateTabViewItemTemplate(tabView, context.collapsedTabTemplate,
-                                                    context.collapsedTabTemplateValidated)
-                      : ValidateTabViewItemTemplate(tabView, context.tabTemplate,
-                                                    context.tabTemplateValidated);
-    if (usable) {
-        SetAllTabViewItemTemplates(tabView, CurrentTabTemplate(context));
-    }
+    ApplyCurrentTabTemplate(context, window, tabView);
     return true;
 }
 
@@ -1534,7 +1561,7 @@ void UpdateContentMargins(WindowState& window) {
     auto tabView = window.tabView.get();
     bool sidebarVisible =
         tabView && tabView.Visibility() == wux::Visibility::Visible;
-    double width = sidebarVisible ? SidebarWidth() : 0.0;
+    double width = sidebarVisible ? SidebarWidth(window) : 0.0;
     bool onRight = g_sidebarOnRight;
 
     for (auto const& [weakElement, original] : window.shiftedContent) {
@@ -1565,7 +1592,7 @@ void ApplySidebarLayout(WindowState& window) {
     SetValueSaved(window, tabRow, wuxc::Grid::RowSpanProperty(),
                   winrt::box_value(rowCount));
     SetValueSaved(window, tabRow, wux::FrameworkElement::WidthProperty(),
-                  winrt::box_value(SidebarWidth()));
+                  winrt::box_value(SidebarWidth(window)));
     SetValueSaved(window, tabRow, wux::FrameworkElement::HorizontalAlignmentProperty(),
                   winrt::box_value(onRight ? wux::HorizontalAlignment::Right
                                            : wux::HorizontalAlignment::Left));
@@ -1652,6 +1679,7 @@ WindowState* TrackWindow(ThreadContext& context, wuxc::ContentPresenter const& t
         context.windows.push_back(std::make_unique<WindowState>());
         window = context.windows.back().get();
         window->tabRow = winrt::make_weak(tabRow);
+        window->collapsed = g_collapsed;
     }
     window->pageRoot = winrt::make_weak(pageRoot);
     window->tabView = winrt::make_weak(tabView);
@@ -1683,9 +1711,8 @@ WindowState* TrackWindow(ThreadContext& context, wuxc::ContentPresenter const& t
                     context->pendingMenuSweep = true;
                     QueueWork();
                 }
-                if (window->stripApplied && !CurrentTabTemplate(*context) &&
-                    (g_collapsed ? context->collapsedTabTemplate && !context->collapsedTabTemplateValidated
-                                 : context->tabTemplate && !context->tabTemplateValidated)) {
+                if (window->stripApplied && !CurrentTabTemplate(*context, *window) &&
+                    CurrentTabTemplateUntried(*context, *window)) {
                     // The strip went vertical before the window had a tab to
                     // try the template on; now it has one.
                     context->pendingTemplateRetry = true;
@@ -1706,7 +1733,7 @@ WindowState* TrackWindow(ThreadContext& context, wuxc::ContentPresenter const& t
                 for (auto const& tab : tabs) {
                     AddMenuEntry(*window, tab);
                     if (window->stripApplied) {
-                        if (auto itemTemplate = CurrentTabTemplate(*context)) {
+                        if (auto itemTemplate = CurrentTabTemplate(*context, *window)) {
                             SetTabViewItemTemplate(tab, itemTemplate);
                         }
                     }
@@ -1949,6 +1976,33 @@ void OnTabRowSeen(ThreadContext& context, wuxc::ContentPresenter const& tabRow) 
     }
 }
 
+// Rebuilds one window's layout (or removes it) to match the current toggles.
+void RefreshWindow(ThreadContext& context, WindowState& window) {
+    try {
+        if (window.layoutApplied) {
+            RemoveLayout(window);
+            // Let the restored template build its parts (the list's
+            // horizontal items panel in particular) before re-applying,
+            // or the re-apply finds the old panel that is about to go.
+            if (auto tabView = window.tabView.get()) {
+                tabView.UpdateLayout();
+            }
+        }
+        UpdateMenuEntries(window);
+        // A toggle or settings change is the one retry a window whose
+        // strip failed gets.
+        window.stripFailed = false;
+        if (g_vertical) {
+            ApplyLayout(context, window);
+        }
+    } catch (winrt::hresult_error const& ex) {
+        Wh_Log(L"Refreshing a window failed: %08X %s", ex.code().value,
+               ex.message().c_str());
+    } catch (...) {
+        Wh_Log(L"Refreshing a window failed");
+    }
+}
+
 // Brings the calling thread's windows in line with the current settings and
 // toggles: the layout rebuilt (or removed), the menu entries relabelled.
 void RefreshCurrentThread() {
@@ -1958,29 +2012,7 @@ void RefreshCurrentThread() {
     }
     PruneClosedWindows(*context);
     for (auto& window : context->windows) {
-        try {
-            if (window->layoutApplied) {
-                RemoveLayout(*window);
-                // Let the restored template build its parts (the list's
-                // horizontal items panel in particular) before re-applying,
-                // or the re-apply finds the old panel that is about to go.
-                if (auto tabView = window->tabView.get()) {
-                    tabView.UpdateLayout();
-                }
-            }
-            UpdateMenuEntries(*window);
-            // A toggle or settings change is the one retry a window whose
-            // strip failed gets.
-            window->stripFailed = false;
-            if (g_vertical) {
-                ApplyLayout(*context, *window);
-            }
-        } catch (winrt::hresult_error const& ex) {
-            Wh_Log(L"Refreshing a window failed: %08X %s", ex.code().value,
-                   ex.message().c_str());
-        } catch (...) {
-            Wh_Log(L"Refreshing a window failed");
-        }
+        RefreshWindow(*context, *window);
     }
 }
 
@@ -1993,7 +2025,8 @@ void RunPendingWork(ThreadContext& context) {
     auto pending = std::move(context.pendingTabRows);
     context.pendingTabRows.clear();
     bool toggleVertical = std::exchange(context.pendingToggleVertical, false);
-    bool toggleCollapsed = std::exchange(context.pendingToggleCollapsed, false);
+    auto collapseToggles = std::move(context.pendingCollapseToggles);
+    context.pendingCollapseToggles.clear();
     bool menuSweep = std::exchange(context.pendingMenuSweep, false);
     bool templateRetry = std::exchange(context.pendingTemplateRetry, false);
     if (!g_active) {
@@ -2012,16 +2045,8 @@ void RunPendingWork(ThreadContext& context) {
             if (!tabView || !window->stripApplied) {
                 continue;
             }
-            Guarded(L"Retrying the tab template", [&] {
-                bool usable = g_collapsed
-                                  ? ValidateTabViewItemTemplate(tabView, context.collapsedTabTemplate,
-                                                                context.collapsedTabTemplateValidated)
-                                  : ValidateTabViewItemTemplate(tabView, context.tabTemplate,
-                                                                context.tabTemplateValidated);
-                if (usable) {
-                    SetAllTabViewItemTemplates(tabView, CurrentTabTemplate(context));
-                }
-            });
+            Guarded(L"Retrying the tab template",
+                    [&] { ApplyCurrentTabTemplate(context, *window, tabView); });
         }
     }
 
@@ -2086,17 +2111,26 @@ void RunPendingWork(ThreadContext& context) {
         }
     }
 
-    if (toggleVertical || toggleCollapsed) {
-        if (toggleVertical) {
-            g_vertical = !g_vertical;
-            Wh_SetIntValue(L"vertical", g_vertical);
+    // Collapsing is per window: only the window whose button was clicked is
+    // rebuilt. Its new state is also what the next new window starts with.
+    for (auto const& weakTabView : collapseToggles) {
+        auto tabView = weakTabView.get();
+        auto window = tabView ? FindWindowByTabView(context, tabView) : nullptr;
+        if (!window || !window->layoutApplied) {
+            continue;
         }
-        if (toggleCollapsed) {
-            g_collapsed = !g_collapsed;
-            Wh_SetIntValue(L"collapsed", g_collapsed);
-        }
-        Wh_Log(L"Layout: %s%s", g_vertical ? L"vertical" : L"horizontal",
-               g_vertical && g_collapsed ? L", collapsed" : L"");
+        bool collapsed = !window->collapsed;
+        window->collapsed = collapsed;
+        g_collapsed = collapsed;
+        Wh_SetIntValue(L"collapsed", collapsed);
+        Wh_Log(L"Window %s", window->collapsed ? L"collapsed" : L"expanded");
+        RefreshWindow(context, *window);
+    }
+
+    if (toggleVertical) {
+        g_vertical = !g_vertical;
+        Wh_SetIntValue(L"vertical", g_vertical);
+        Wh_Log(L"Layout: %s", g_vertical ? L"vertical" : L"horizontal");
         ForEachWindowThread([](void*) { RefreshCurrentThread(); }, nullptr);
     }
 }
@@ -2146,13 +2180,15 @@ void QueueTabRow(ThreadContext& context, wuxc::ContentPresenter const& tabRow) {
 
 // From a click handler: the layout changes once the click (and the menu it came
 // from) has finished.
-void RequestToggle(bool collapse) {
+void RequestToggleVertical() {
     auto context = GetThreadContext(true);
-    if (collapse) {
-        context->pendingToggleCollapsed = true;
-    } else {
-        context->pendingToggleVertical = true;
-    }
+    context->pendingToggleVertical = true;
+    QueueWork();
+}
+
+void RequestToggleCollapsed(winrt::weak_ref<muxc::TabView> const& tabView) {
+    auto context = GetThreadContext(true);
+    context->pendingCollapseToggles.push_back(tabView);
     QueueWork();
 }
 

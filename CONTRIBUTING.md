@@ -85,6 +85,8 @@ Against a portable Terminal 1.24 with the mod loaded through a scoped portable W
 - [ ] Toggle on and off from the tab context menu; the horizontal strip afterwards is
       pixel-identical to a fresh start
 - [ ] Collapse and expand; the new-tab dropdown arrow comes back after expanding
+- [ ] With three windows, collapsing one leaves the others expanded, and a new window starts the
+      way the last one was left
 - [ ] Toggle state and collapsed state survive a restart
 - [ ] "Show tabs in title bar" on and off, light and dark theme
 - [ ] Focus mode and full screen hide the sidebar; with "Always show tabs" off, one tab hides it
