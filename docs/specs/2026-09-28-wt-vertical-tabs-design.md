@@ -78,11 +78,31 @@ Findings that shaped this part:
    info bars get a matching margin, which follows the `TabView`'s visibility so focus mode, full
    screen and "one tab, always show tabs off" hide the sidebar and give the width back.
 2. The `TabView` template's outer rows are swapped so the strip fills the height. `TabContainerGrid`
-   loses its four column definitions and gains four rows: collapse button, header (the elevation
-   shield), the tab list, the footer (Terminal's new-tab split button).
+   loses its four column definitions and gains five rows: collapse button, header (the elevation
+   shield), the tab list, the footer (Terminal's new-tab split button), and the rest of the height.
+   The list's row sizes to its content, so the footer follows the last tab; `FitTabListHeight`
+   caps the list's `MaxHeight` at what the other rows leave, recomputed when the strip resizes, so a
+   long list scrolls with the footer still in view.
 3. The list's `ItemsStackPanel` turns vertical and its scroll viewer switches horizontal scrolling
    off and vertical scrolling on.
 4. Each tab gets the row template, first tried synchronously on one tab.
+
+### Peeking
+
+A collapsed rail opens to full width while the mouse rests on it and closes when the mouse leaves,
+as in Edge. Only the look changes (`SetPeek`): the tab row widens, the terminal and the info bars get
+`Canvas.ZIndex` -1 so the sidebar draws over them while overlays such as the command palette stay on
+top, and an opaque backdrop the mod inserts at the back of `TabContainerGrid` hides the terminal
+underneath. The terminal keeps the rail's margin (`DockedWidth`), so it never reflows. Nothing is
+removed from the tree, so the pointer events that drive it don't restart.
+
+Pointer events alone can't be trusted to say where the mouse is: `PointerEntered` and
+`PointerExited` bubble up from every child the pointer crosses, and a fast exit off the window's edge
+can arrive with the last position still inside, or not at all. So events only schedule a check, and
+the check reads the cursor (`GetCursorPos`, the window under it, that window's XAML island, the tab
+row's bounds). While open, it polls every 150 ms and closes 300 ms after the cursor is first seen
+outside, but not while a popup is open or a tab is being dragged. Measured: opening or closing with
+100 tabs takes about 50 ms. Touch and pen are ignored: a tap would open a rail nothing would close.
 
 ### The width fight
 

@@ -39,7 +39,8 @@ into the Windhawk editor. Do not split it.
 7. The context menu toggle.
 8. The vertical strip: `ApplyVerticalStrip` / `RemoveVerticalStrip`, the new-tab button, the
    collapse button, `ReassertVerticalStrip`.
-9. Layout: `ApplySidebarLayout`, `TrackWindow`, `ApplyLayout`, `RemoveLayout`, `UntrackWindow`,
+9. Layout: `ApplySidebarLayout`, peeking (`SetPeek`, `PointerOverSidebar`, `OnPeekTimer`, the
+   pointer and drag handlers), `TrackWindow`, `ApplyLayout`, `RemoveLayout`, `UntrackWindow`,
    `RefreshWindow`, `RefreshCurrentThread`.
 10. Deferred work (`RunPendingWork`, `QueueWork`, `RequestToggleVertical`,
     `RequestToggleCollapsed`) and the `WTVT_TEST_HOOKS` seam.
@@ -90,8 +91,14 @@ keystrokes land in the test Terminal, or Windows switches the user to the test d
 
 Drive the test Terminal with UI Automation (Invoke on buttons and menu items) and capture it with
 `PrintWindow(PW_RENDERFULLCONTENT)`; both work on another virtual desktop. Posted mouse messages do
-not drive XAML's right-tap reliably. In a `WTVT_TEST_HOOKS` build, post the registered message
-`WTVT_TEST_OPEN_TAB_MENU` (wParam: tab index) to a Terminal window to open that tab's context menu.
+not drive XAML's right-tap reliably. In a `WTVT_TEST_HOOKS` build, post these registered messages to
+a Terminal window: `WTVT_TEST_OPEN_TAB_MENU` (wParam: tab index) opens that tab's context menu;
+`WTVT_TEST_SIDEBAR_POINTER` (wParam 1 or 0) simulates the mouse entering or leaving the sidebar, and
+where the cursor is (wParam 2 goes back to the real cursor); `WTVT_TEST_REPORT` logs whether the
+diagnostics are attached; `WTVT_TEST_CLOSE_POPUPS` closes open menus, since UI Automation can't
+reach the rest of a window while one is open. Test builds also
+mirror every log line to the file named by the `WTVT_TEST_LOG` environment variable, so tests don't
+depend on an `OutputDebugString` listener, which can stop receiving for reasons outside the mod.
 
 Before a release, walk the manual checklist in `CONTRIBUTING.md`.
 

@@ -2,7 +2,7 @@
 // @id              windows-terminal-vertical-tabs
 // @name            Windows Terminal Vertical Tabs
 // @description     Browser-style vertical tabs for Windows Terminal, toggled from any tab's right-click menu
-// @version         1.0.1
+// @version         1.1.0
 // @author          Lattice Labs
 // @github          https://github.com/addievo
 // @homepage        https://github.com/latticelabs-au/wt-vertical-tabs
@@ -33,8 +33,10 @@ until you ask for vertical ones.
 - **Turn it on:** right-click any tab and choose **Turn on vertical tabs**.
 - **Turn it off:** right-click any tab and choose **Turn off vertical tabs**.
 - **Collapse or expand:** the pane button at the top of the sidebar. Collapsed,
-  the sidebar is a narrow rail of tab icons; hover one for its title. Each
-  window collapses on its own.
+  the sidebar is a narrow rail of tab icons. Each window collapses on its own.
+- **Peek:** rest the mouse on a collapsed rail and it opens over the terminal,
+  with titles, until the mouse leaves. The terminal doesn't move.
+- **New tab:** the **+** button sits right under the last tab.
 
 Both choices are remembered across restarts. New windows, and every window
 after a restart, start collapsed or expanded the way you last left one.
@@ -101,11 +103,14 @@ Source, screenshots and the design notes:
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Devices.Input.h>
 #include <winrt/Windows.System.h>
+#include <winrt/Windows.UI.Input.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Automation.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
+#include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Markup.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
@@ -114,8 +119,56 @@ namespace wf = winrt::Windows::Foundation;
 namespace ws = winrt::Windows::System;
 namespace wux = winrt::Windows::UI::Xaml;
 namespace wuxc = winrt::Windows::UI::Xaml::Controls;
+namespace wuxi = winrt::Windows::UI::Xaml::Input;
 namespace wuxm = winrt::Windows::UI::Xaml::Media;
 namespace muxc = winrt::Microsoft::UI::Xaml::Controls;
+
+#ifdef WTVT_TEST_HOOKS
+// Test builds also append every log line to the file named by WTVT_TEST_LOG,
+// so a test can read the mod's log without an OutputDebugString listener,
+// which can stop receiving for reasons outside the mod.
+void TestLogLine(PCWSTR format, ...) {
+    WCHAR path[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"WTVT_TEST_LOG", path, ARRAYSIZE(path))) {
+        return;
+    }
+    WCHAR line[1024];
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(line, _TRUNCATE, format, args);
+    va_end(args);
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    char text[4096];
+    int prefix = sprintf_s(text, "%02u:%02u:%02u %lu ", now.wHour, now.wMinute, now.wSecond,
+                           GetCurrentProcessId());
+    int body = WideCharToMultiByte(CP_UTF8, 0, line, -1, text + prefix,
+                                   static_cast<int>(sizeof(text)) - prefix - 2, nullptr, nullptr);
+    if (prefix < 0 || body <= 0) {
+        return;
+    }
+    int length = prefix + body - 1;
+    text[length++] = '\r';
+    text[length++] = '\n';
+    HANDLE file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written;
+        WriteFile(file, text, length, &written, nullptr);
+        CloseHandle(file);
+    }
+}
+
+#undef Wh_Log
+#define Wh_Log(message, ...)                                                       \
+    do {                                                                           \
+        if (InternalWh_IsLogEnabled(InternalWhModPtr)) {                           \
+            InternalWh_Log_Wrapper(L"[%d:%S]: " message, __LINE__, __FUNCTION__, \
+                                   ##__VA_ARGS__);                                 \
+        }                                                                          \
+        TestLogLine(L"[%d:%S]: " message, __LINE__, __FUNCTION__, ##__VA_ARGS__);  \
+    } while (0)
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 // Settings
@@ -590,6 +643,28 @@ struct WindowState {
     bool stripFailed = false;
     // Collapsed to the icon rail, by this window's own collapse button.
     bool collapsed = false;
+    // A collapsed rail opens to full width while the mouse rests on it, drawn
+    // over the terminal rather than pushing it aside (see SetPeek), and closes
+    // when the mouse leaves. After the rail is collapsed with the mouse on its
+    // button, it stays shut until the mouse has left once.
+    bool peeking = false;
+    bool suppressPeek = false;
+    bool dragging = false;
+    ULONGLONG leftAt = 0;
+    wf::IInspectable pointerEnteredHandler{nullptr};
+    wf::IInspectable pointerExitedHandler{nullptr};
+    winrt::event_token dragStartingToken{};
+    winrt::event_token dragCompletedToken{};
+    ws::DispatcherQueueTimer peekTimer{nullptr};
+    winrt::event_token peekTimerToken{};
+    // The opaque backdrop behind the strip while it peeks over the terminal
+    // (see kPeekBackdropXaml); plain when its theme resources failed to load.
+    winrt::weak_ref<wuxc::Border> peekBackdrop;
+    bool peekBackdropPlain = false;
+    // The XAML island window this sidebar lives in, recorded each time the
+    // mouse enters it: other Terminal windows share the thread, and may share
+    // the size too.
+    HWND island = nullptr;
 
     // Set when "Show tabs in title bar" is on: the title bar presenter the tab
     // row was taken from, and the title bar itself, whose background the
@@ -614,6 +689,10 @@ struct WindowState {
     winrt::weak_ref<wuxc::ListView> listView;
     winrt::weak_ref<wux::FrameworkElement> itemsPresenter;
     winrt::event_token itemsPresenterSizeChangedToken{};
+    // The strip footer (Windows Terminal's new-tab button). It sits right under
+    // the last tab; the size handler keeps the tab list short enough for that.
+    winrt::weak_ref<wux::FrameworkElement> footer;
+    winrt::event_token containerSizeChangedToken{};
 
     // The collapse/expand button the mod adds at the top of the sidebar.
     winrt::weak_ref<wuxc::Button> collapseButton;
@@ -628,6 +707,7 @@ struct WindowState {
     int64_t newTabFlyoutToken = 0;
     wuxc::Primitives::FlyoutBase newTabFlyout{nullptr};
     wf::IInspectable newTabFlyoutPlacement{nullptr};
+    winrt::event_token newTabFlyoutOpeningToken{};
 
     // See ReassertVerticalStrip.
     int reassertCount = 0;
@@ -667,6 +747,9 @@ struct ThreadContext {
     // an automated test open a tab's context menu without real mouse input.
     HHOOK testHook = nullptr;
     int pendingTestMenuTab = -1;
+    int pendingTestPointer = -1;
+    bool pendingTestReport = false;
+    bool pendingTestClosePopups = false;
     // The menu the hook last opened, and its one-shot Opened handler, which
     // stays registered if the menu never opens; revoked on the next open and
     // in the thread's uninit. Held strongly: a weak reference to a flyout can
@@ -699,8 +782,30 @@ UINT TestMessage() {
     return message;
 }
 
+// wParam 1: the mouse entered the sidebar, 0: it left. The cursor is then
+// taken to be where the message says, not where it really is, until a
+// message with wParam 2 puts the real cursor back.
+UINT TestPointerMessage() {
+    static UINT message = RegisterWindowMessageW(L"WTVT_TEST_SIDEBAR_POINTER");
+    return message;
+}
+
+// Logs whether the diagnostics are attached, from the UI thread.
+UINT TestReportMessage() {
+    static UINT message = RegisterWindowMessageW(L"WTVT_TEST_REPORT");
+    return message;
+}
+
+// Closes every open popup (menus, flyouts) of the thread's windows, as Escape
+// would; UI Automation can't reach the rest of a window while one is open.
+UINT TestClosePopupsMessage() {
+    static UINT message = RegisterWindowMessageW(L"WTVT_TEST_CLOSE_POPUPS");
+    return message;
+}
+
 void QueueWork();
 LRESULT CALLBACK TestGetMessageHook(int code, WPARAM wParam, LPARAM lParam);
+int DiagnosticsAdvisedForTest();
 
 void RevokeTestMenuHandler(ThreadContext& context) {
     auto menu = std::exchange(context.testMenu, nullptr);
@@ -769,8 +874,37 @@ void RestoreSavedValues(WindowState& window) {
     window.savedValues.clear();
 }
 
+// Whether the sidebar shows the icon rail right now (collapsed, and not peeking).
+bool LooksCollapsed(WindowState const& window) {
+    return window.collapsed && !window.peeking;
+}
+
+// The sidebar's width right now.
 double SidebarWidth(WindowState const& window) {
+    return LooksCollapsed(window) ? kCollapsedWidth : g_sidebarWidth.load();
+}
+
+// The room the terminal makes for the sidebar. A peeking rail draws over the
+// terminal, so the terminal keeps the rail's width and doesn't reflow.
+double DockedWidth(WindowState const& window) {
     return window.collapsed ? kCollapsedWidth : g_sidebarWidth.load();
+}
+
+// Puts one recorded property back to its value from before the mod, keeping the
+// record, for parts of the layout that switch back and forth.
+void RestoreSavedValue(WindowState& window,
+                       wux::DependencyObject const& object,
+                       wux::DependencyProperty const& property) {
+    for (auto const& entry : window.savedValues) {
+        if (entry.property == property && entry.Object() == object) {
+            if (entry.value == wux::DependencyProperty::UnsetValue()) {
+                object.ClearValue(property);
+            } else {
+                object.SetValue(property, entry.value);
+            }
+            return;
+        }
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -896,7 +1030,7 @@ bool ValidateTabViewItemTemplate(muxc::TabView const& tabView,
 
 // The template a window's tabs should have right now, or null for the stock one.
 wuxc::ControlTemplate CurrentTabTemplate(ThreadContext& context, WindowState const& window) {
-    if (window.collapsed) {
+    if (LooksCollapsed(window)) {
         return context.collapsedTabTemplateValidated ? context.collapsedTabTemplate : nullptr;
     }
     return context.tabTemplateValidated ? context.tabTemplate : nullptr;
@@ -904,7 +1038,7 @@ wuxc::ControlTemplate CurrentTabTemplate(ThreadContext& context, WindowState con
 
 // Whether the window's template has yet to be tried (it needs a tab to try it on).
 bool CurrentTabTemplateUntried(ThreadContext& context, WindowState const& window) {
-    return window.collapsed
+    return LooksCollapsed(window)
                ? context.collapsedTabTemplate && !context.collapsedTabTemplateValidated
                : context.tabTemplate && !context.tabTemplateValidated;
 }
@@ -914,7 +1048,7 @@ bool CurrentTabTemplateUntried(ThreadContext& context, WindowState const& window
 void ApplyCurrentTabTemplate(ThreadContext& context,
                              WindowState const& window,
                              muxc::TabView const& tabView) {
-    bool usable = window.collapsed
+    bool usable = LooksCollapsed(window)
                       ? ValidateTabViewItemTemplate(tabView, context.collapsedTabTemplate,
                                                     context.collapsedTabTemplateValidated)
                       : ValidateTabViewItemTemplate(tabView, context.tabTemplate,
@@ -1091,12 +1225,39 @@ void ReassertVerticalStrip(WindowState& window) {
     }
 }
 
+WindowState* FindWindowByTabView(ThreadContext& context, muxc::TabView const& tabView);
+
+template <typename Step>
+void Guarded(PCWSTR what, Step&& step);
+
 // The new-tab dropdown is placed for a button at the top of the window
-// (BottomEdgeAlignedLeft). At the foot of the sidebar it opens upwards
-// instead. Terminal rebuilds the flyout on every settings reload, so the
-// placement is set again whenever the button gets a new one.
+// (BottomEdgeAlignedLeft). In the sidebar the button follows the last tab, so
+// it opens towards the free space: down from a button in the top half of the
+// window, up from one in the bottom half, decided each time it opens. Terminal
+// rebuilds the flyout on every settings reload, so the handler moves with it.
+wuxc::Primitives::FlyoutPlacementMode NewTabFlyoutPlacement(WindowState const& window) {
+    bool up = true;
+    try {
+        auto button = window.newTabButton.get();
+        auto root = button ? button.XamlRoot() : nullptr;
+        if (root && root.Size().Height > 0) {
+            auto top = button.TransformToVisual(nullptr).TransformPoint(wf::Point{0, 0}).Y;
+            up = top + button.ActualHeight() / 2 > root.Size().Height / 2;
+        }
+    } catch (...) {
+    }
+    using Mode = wuxc::Primitives::FlyoutPlacementMode;
+    if (up) {
+        return g_sidebarOnRight ? Mode::TopEdgeAlignedRight : Mode::TopEdgeAlignedLeft;
+    }
+    return g_sidebarOnRight ? Mode::BottomEdgeAlignedRight : Mode::BottomEdgeAlignedLeft;
+}
+
 void RestoreNewTabFlyoutPlacement(WindowState& window) {
     if (auto flyout = std::exchange(window.newTabFlyout, nullptr)) {
+        if (auto token = std::exchange(window.newTabFlyoutOpeningToken, {})) {
+            flyout.Opening(token);
+        }
         auto original = std::exchange(window.newTabFlyoutPlacement, nullptr);
         if (original == wux::DependencyProperty::UnsetValue()) {
             flyout.ClearValue(wuxc::Primitives::FlyoutBase::PlacementProperty());
@@ -1119,32 +1280,52 @@ void PlaceNewTabFlyout(WindowState& window) {
         window.newTabFlyout = flyout;
         window.newTabFlyoutPlacement =
             flyout.ReadLocalValue(wuxc::Primitives::FlyoutBase::PlacementProperty());
+        window.newTabFlyoutOpeningToken = flyout.Opening(
+            [weakTabView = window.tabView](wf::IInspectable const& sender, wf::IInspectable const&) {
+                try {
+                    auto context = GetThreadContext(false);
+                    auto tabView = weakTabView.get();
+                    auto window = context && tabView ? FindWindowByTabView(*context, tabView) : nullptr;
+                    auto flyout = sender.try_as<wuxc::Primitives::FlyoutBase>();
+                    if (g_active && window && flyout) {
+                        flyout.Placement(NewTabFlyoutPlacement(*window));
+                    }
+                } catch (...) {
+                }
+            });
     }
-    flyout.Placement(g_sidebarOnRight
-                         ? wuxc::Primitives::FlyoutPlacementMode::TopEdgeAlignedRight
-                         : wuxc::Primitives::FlyoutPlacementMode::TopEdgeAlignedLeft);
+    flyout.Placement(NewTabFlyoutPlacement(window));
 }
 
 // In the collapsed rail the split button keeps its "+" and drops the dropdown
-// arrow, which the rail has no room for; expanding brings it back.
+// arrow, which the rail has no room for; expanding (or peeking) brings it back.
 void FitNewTabButton(WindowState& window, muxc::SplitButton const& button) {
-    if (!window.collapsed || wuxm::VisualTreeHelper::GetChildrenCount(button) == 0) {
+    if (wuxm::VisualTreeHelper::GetChildrenCount(button) == 0) {
         return;
     }
     auto root = wuxm::VisualTreeHelper::GetChild(button, 0).try_as<wuxc::Grid>();
     if (!root || root.ColumnDefinitions().Size() != 3) {
         return;
     }
+    bool rail = LooksCollapsed(window);
     for (uint32_t column : {1u, 2u}) {
-        SetValueSaved(window, root.ColumnDefinitions().GetAt(column),
-                      wuxc::ColumnDefinition::WidthProperty(),
-                      winrt::box_value(wux::GridLengthHelper::FromPixels(0)));
+        auto definition = root.ColumnDefinitions().GetAt(column);
+        if (rail) {
+            SetValueSaved(window, definition, wuxc::ColumnDefinition::WidthProperty(),
+                          winrt::box_value(wux::GridLengthHelper::FromPixels(0)));
+        } else {
+            RestoreSavedValue(window, definition, wuxc::ColumnDefinition::WidthProperty());
+        }
     }
     if (auto secondary = FindDescendant(
             root, [](wux::DependencyObject const& e) { return HasName(e, L"SecondaryButton"); },
             nullptr, 4)) {
-        SetValueSaved(window, secondary, wux::UIElement::VisibilityProperty(),
-                      winrt::box_value(wux::Visibility::Collapsed));
+        if (rail) {
+            SetValueSaved(window, secondary, wux::UIElement::VisibilityProperty(),
+                          winrt::box_value(wux::Visibility::Collapsed));
+        } else {
+            RestoreSavedValue(window, secondary, wux::UIElement::VisibilityProperty());
+        }
     }
 }
 
@@ -1181,13 +1362,18 @@ void AttachNewTabButton(WindowState& window, wux::DependencyObject const& footer
 }
 
 void DetachNewTabButton(WindowState& window) {
-    auto button = window.newTabButton.get();
-    if (button && window.newTabFlyoutToken) {
-        button.UnregisterPropertyChangedCallback(muxc::SplitButton::FlyoutProperty(),
-                                                 window.newTabFlyoutToken);
-    }
+    // The flyout's Opening handler first: it points into this module.
+    Guarded(L"Restoring the new-tab dropdown", [&] { RestoreNewTabFlyoutPlacement(window); });
+    Guarded(L"Revoking the new-tab callback", [&] {
+        auto button = window.newTabButton.get();
+        if (button && window.newTabFlyoutToken) {
+            button.UnregisterPropertyChangedCallback(muxc::SplitButton::FlyoutProperty(),
+                                                     window.newTabFlyoutToken);
+        }
+    });
     window.newTabFlyoutToken = 0;
-    RestoreNewTabFlyoutPlacement(window);
+    window.newTabFlyout = nullptr;
+    window.newTabFlyoutOpeningToken = {};
 }
 
 // The collapse/expand button, in the sidebar's top row, styled like the tabs.
@@ -1237,6 +1423,20 @@ constexpr std::wstring_view kCollapseButtonXaml = LR"(
 
 void RequestToggleCollapsed(winrt::weak_ref<muxc::TabView> const& tabView);
 
+// Centred in the rail, at the sidebar's edge otherwise. While a collapsed rail
+// peeks open the button still offers to expand it, which keeps it open.
+void StyleCollapseButton(WindowState const& window, wuxc::Button const& button) {
+    button.HorizontalAlignment(LooksCollapsed(window)
+                                   ? wux::HorizontalAlignment::Center
+                                   : (g_sidebarOnRight ? wux::HorizontalAlignment::Right
+                                                       : wux::HorizontalAlignment::Left));
+    button.Margin(LooksCollapsed(window) ? wux::Thickness{0, 4, 0, 0}
+                                         : wux::Thickness{8, 4, 8, 0});
+    PCWSTR label = window.collapsed ? L"Expand tabs" : L"Collapse tabs";
+    wuxc::ToolTipService::SetToolTip(button, winrt::box_value(label));
+    wux::Automation::AutomationProperties::SetName(button, label);
+}
+
 void AddCollapseButton(WindowState& window, wuxc::Grid const& containerGrid) {
     if (window.collapseButton.get()) {
         return;
@@ -1246,14 +1446,7 @@ void AddCollapseButton(WindowState& window, wuxc::Grid const& containerGrid) {
         return;
     }
     button.Content(winrt::box_value(g_sidebarOnRight ? L"\xE90D" : L"\xE90C"));
-    button.HorizontalAlignment(window.collapsed
-                                   ? wux::HorizontalAlignment::Center
-                                   : (g_sidebarOnRight ? wux::HorizontalAlignment::Right
-                                                       : wux::HorizontalAlignment::Left));
-    button.Margin(window.collapsed ? wux::Thickness{0, 4, 0, 0} : wux::Thickness{8, 4, 8, 0});
-    PCWSTR label = window.collapsed ? L"Expand tabs" : L"Collapse tabs";
-    wuxc::ToolTipService::SetToolTip(button, winrt::box_value(label));
-    wux::Automation::AutomationProperties::SetName(button, label);
+    StyleCollapseButton(window, button);
     wuxc::Grid::SetRow(button, 0);
 
     // Collapses this window only.
@@ -1264,6 +1457,52 @@ void AddCollapseButton(WindowState& window, wuxc::Grid const& containerGrid) {
         });
     containerGrid.Children().Append(button);
     window.collapseButton = winrt::make_weak(button);
+}
+
+// Behind everything else in the strip, spanning all its rows. Two layers: the
+// outer keeps its theme resources, and the mod never writes its brushes, so
+// they follow the window's theme; the inner carries the sidebar's own colour
+// when that is opaque, and is empty otherwise.
+constexpr wchar_t kPeekBackdropXaml[] = LR"(
+<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        Visibility="Collapsed"
+        BackgroundSizing="OuterBorderEdge"
+        Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+    <Border />
+</Border>
+)";
+
+void AddPeekBackdrop(WindowState& window, wuxc::Grid const& containerGrid) {
+    if (window.peekBackdrop.get()) {
+        return;
+    }
+    auto backdrop = LoadXaml<wuxc::Border>(kPeekBackdropXaml);
+    if (!backdrop) {
+        // Without the theme resources: a plain fill, picked for the theme each
+        // time the rail peeks (see SetPeek).
+        backdrop = wuxc::Border{};
+        backdrop.Visibility(wux::Visibility::Collapsed);
+        backdrop.BackgroundSizing(wuxc::BackgroundSizing::OuterBorderEdge);
+        backdrop.Child(wuxc::Border{});
+        window.peekBackdropPlain = true;
+    }
+    wuxc::Grid::SetRowSpan(backdrop, 5);
+    containerGrid.Children().InsertAt(0, backdrop);
+    window.peekBackdrop = winrt::make_weak(backdrop);
+}
+
+void RemovePeekBackdrop(WindowState& window) {
+    if (auto backdrop = window.peekBackdrop.get()) {
+        if (auto grid = window.containerGrid.get()) {
+            uint32_t index = 0;
+            if (grid.Children().IndexOf(backdrop, index)) {
+                grid.Children().RemoveAt(index);
+            }
+        }
+    }
+    window.peekBackdrop = nullptr;
+    window.peekBackdropPlain = false;
 }
 
 void RemoveCollapseButton(WindowState& window) {
@@ -1338,6 +1577,66 @@ StripParts FindStripParts(muxc::TabView const& tabView) {
     return parts;
 }
 
+WindowState* FindWindowByTabView(ThreadContext& context, muxc::TabView const& tabView);
+
+// The strip footer holding Windows Terminal's new-tab button.
+void StyleFooter(WindowState& window) {
+    auto footer = window.footer.get();
+    if (!footer) {
+        return;
+    }
+    double width = SidebarWidth(window);
+    bool rail = LooksCollapsed(window);
+    SetValueSaved(window, footer, wux::FrameworkElement::MinWidthProperty(),
+                  winrt::box_value(width));
+    SetValueSaved(window, footer, wux::FrameworkElement::MarginProperty(),
+                  winrt::box_value(rail ? wux::Thickness{0, 0, 0, 4} : wux::Thickness{4, 0, 4, 4}));
+    SetValueSaved(window, footer, wuxc::ContentPresenter::HorizontalContentAlignmentProperty(),
+                  winrt::box_value(rail ? wux::HorizontalAlignment::Center
+                                        : wux::HorizontalAlignment::Stretch));
+    // UpdateTabWidths reads the footer's desired size from inside
+    // TabView::MeasureOverride, before the footer is measured again, so it has
+    // to be current before the next layout pass.
+    footer.Measure(wf::Size{static_cast<float>(width), std::numeric_limits<float>::infinity()});
+}
+
+// The tab list's row sizes to its content, so the new-tab button follows the
+// last tab; the list may grow only as tall as the rows around it leave room for,
+// after which it scrolls. Measured, not read from the rows, because right after
+// the strip is rearranged the new rows have no sizes yet.
+void FitTabListHeight(WindowState& window) {
+    auto containerGrid = window.containerGrid.get();
+    auto listView = window.listView.get();
+    if (!containerGrid || !listView) {
+        return;
+    }
+    double height = containerGrid.ActualHeight();
+    if (height <= 0) {
+        return;  // not laid out yet; the size handler comes back to it
+    }
+    double rows[4] = {};
+    wf::Size available{static_cast<float>(SidebarWidth(window)),
+                       std::numeric_limits<float>::infinity()};
+    for (auto const& child : containerGrid.Children()) {
+        auto element = child.try_as<wux::FrameworkElement>();
+        if (!element || element == listView ||
+            element.Visibility() != wux::Visibility::Visible) {
+            continue;
+        }
+        int row = wuxc::Grid::GetRow(element);
+        if (row < 0 || row > 3 || row == 2 || wuxc::Grid::GetRowSpan(element) > 1) {
+            continue;
+        }
+        element.Measure(available);
+        rows[row] = std::max<double>(rows[row], element.DesiredSize().Height);
+    }
+    double maxHeight = std::max(0.0, height - rows[0] - rows[1] - rows[3]);
+    if (std::abs(listView.MaxHeight() - maxHeight) >= 0.5) {
+        SetValueSaved(window, listView, wux::FrameworkElement::MaxHeightProperty(),
+                      winrt::box_value(maxHeight));
+    }
+}
+
 bool ApplyVerticalStrip(ThreadContext& context,
                         WindowState& window,
                         muxc::TabView const& tabView) {
@@ -1353,8 +1652,6 @@ bool ApplyVerticalStrip(ThreadContext& context,
     // open, say) has an untemplated list: template it now, so its scroll
     // viewer and items presenter exist for the lookups below.
     listView.ApplyTemplate();
-
-    double width = SidebarWidth(window);
 
     // The template's two rows are the strip and the (unused) tab content;
     // the strip takes the height.
@@ -1374,9 +1671,12 @@ bool ApplyVerticalStrip(ThreadContext& context,
     }
     containerGrid.ColumnDefinitions().Clear();
 
-    // Collapse button, header, tab list, footer.
+    // Collapse button, header, tab list, footer, and the rest of the height
+    // below them: the new-tab button sits right under the last tab, as in a
+    // browser, and the list scrolls once it fills the sidebar (FitTabListHeight).
     for (auto unit : {wux::GridUnitType::Auto, wux::GridUnitType::Auto,
-                      wux::GridUnitType::Star, wux::GridUnitType::Auto}) {
+                      wux::GridUnitType::Auto, wux::GridUnitType::Auto,
+                      wux::GridUnitType::Star}) {
         wuxc::RowDefinition row;
         row.Height(wux::GridLengthHelper::FromValueAndType(1, unit));
         containerGrid.RowDefinitions().Append(row);
@@ -1403,25 +1703,15 @@ bool ApplyVerticalStrip(ThreadContext& context,
         } else if (name == L"TabListView") {
             row = 2;
         } else if (name == L"RightContentPresenter") {
-            SetValueSaved(window, element, wux::FrameworkElement::MinWidthProperty(),
-                          winrt::box_value(width));
-            SetValueSaved(window, element, wux::FrameworkElement::MarginProperty(),
-                          winrt::box_value(window.collapsed ? wux::Thickness{0, 0, 0, 4}
-                                                       : wux::Thickness{4, 0, 4, 4}));
-            SetValueSaved(window, element, wuxc::ContentPresenter::HorizontalContentAlignmentProperty(),
-                          winrt::box_value(window.collapsed ? wux::HorizontalAlignment::Center
-                                                       : wux::HorizontalAlignment::Stretch));
-            // UpdateTabWidths reads the footer's desired size from inside
-            // TabView::MeasureOverride, before the footer is measured again,
-            // so it has to be current before the next layout pass.
-            element.Measure(wf::Size{static_cast<float>(width),
-                                     std::numeric_limits<float>::infinity()});
+            window.footer = winrt::make_weak(element);
+            StyleFooter(window);
             AttachNewTabButton(window, element);
         }
         SetValueSaved(window, element, wuxc::Grid::RowProperty(), winrt::box_value(row));
     }
 
     AddCollapseButton(window, containerGrid);
+    AddPeekBackdrop(window, containerGrid);
 
     // The list's scroll viewer takes these through template bindings.
     SetValueSaved(window, listView, wuxc::ScrollViewer::HorizontalScrollBarVisibilityProperty(),
@@ -1477,8 +1767,22 @@ bool ApplyVerticalStrip(ThreadContext& context,
     // Should TabView turn horizontal scrolling back on anyway, the tabs get
     // measured at their full title width and the items presenter grows past
     // the sidebar; undo it when that happens.
+    window.listView = winrt::make_weak(listView);
+    FitTabListHeight(window);
+    window.containerSizeChangedToken = containerGrid.SizeChanged(
+        [weakTabView = winrt::make_weak(tabView)](wf::IInspectable const&,
+                                                  wux::SizeChangedEventArgs const&) {
+            auto context = GetThreadContext(false);
+            auto tabView = weakTabView.get();
+            if (!context || !tabView || !g_active) {
+                return;
+            }
+            if (auto window = FindWindowByTabView(*context, tabView)) {
+                Guarded(L"Fitting the tab list", [&] { FitTabListHeight(*window); });
+            }
+        });
+
     if (auto itemsPresenter = FindStripPart(listView, L"TabsItemsPresenter")) {
-        window.listView = winrt::make_weak(listView);
         window.itemsPresenter = winrt::make_weak(itemsPresenter);
         window.itemsPresenterSizeChangedToken = itemsPresenter.SizeChanged(
             [weakTabView = winrt::make_weak(tabView)](wf::IInspectable const&,
@@ -1523,8 +1827,17 @@ void RemoveVerticalStrip(WindowState& window) {
         }
     });
     window.itemsPresenterSizeChangedToken = {};
+    Guarded(L"Revoking the strip size handler", [&] {
+        auto containerGrid = window.containerGrid.get();
+        if (containerGrid && window.containerSizeChangedToken) {
+            containerGrid.SizeChanged(window.containerSizeChangedToken);
+        }
+    });
+    window.containerSizeChangedToken = {};
+    window.footer = nullptr;
     Guarded(L"Detaching the new-tab button", [&] { DetachNewTabButton(window); });
     Guarded(L"Removing the collapse button", [&] { RemoveCollapseButton(window); });
+    Guarded(L"Removing the peek backdrop", [&] { RemovePeekBackdrop(window); });
 
     Guarded(L"Restoring tab templates", [&] {
         if (auto tabView = window.tabView.get()) {
@@ -1561,7 +1874,7 @@ void UpdateContentMargins(WindowState& window) {
     auto tabView = window.tabView.get();
     bool sidebarVisible =
         tabView && tabView.Visibility() == wux::Visibility::Visible;
-    double width = sidebarVisible ? SidebarWidth(window) : 0.0;
+    double width = sidebarVisible ? DockedWidth(window) : 0.0;
     bool onRight = g_sidebarOnRight;
 
     for (auto const& [weakElement, original] : window.shiftedContent) {
@@ -1627,6 +1940,380 @@ void ApplySidebarLayout(WindowState& window) {
     }
 
     UpdateContentMargins(window);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Peeking: a collapsed rail opens while the mouse rests on it
+
+constexpr int kPeekOpenDelayMs = 200;
+constexpr int kPeekCloseDelayMs = 300;
+constexpr int kPeekPollMs = 150;
+
+#ifdef WTVT_TEST_HOOKS
+// Set by the test hook: -1 uses the real cursor, 0 or 1 says where it is.
+std::atomic<int> g_testPointerOver{-1};
+#endif
+
+// The XAML island window (Terminal's DesktopWindowContentBridge) under a screen
+// point, if it belongs to this process, and the point in its client coordinates.
+HWND IslandAt(POINT screen, POINT* client) {
+    HWND hit = WindowFromPoint(screen);
+    HWND top = hit ? GetAncestor(hit, GA_ROOT) : nullptr;
+    DWORD processId = 0;
+    if (!top || !GetWindowThreadProcessId(top, &processId) ||
+        processId != GetCurrentProcessId()) {
+        return nullptr;
+    }
+    HWND island = FindWindowExW(top, nullptr, L"Windows.UI.Composition.DesktopWindowContentBridge",
+                                nullptr);
+    *client = screen;
+    return island && ScreenToClient(island, client) ? island : nullptr;
+}
+
+// Records which island the sidebar lives in, from a mouse event it just
+// received, if the cursor is where the event says the pointer is.
+void RecordIsland(WindowState& window, wuxi::PointerRoutedEventArgs const& args) {
+    try {
+        auto tabRow = window.tabRow.get();
+        auto root = tabRow ? tabRow.XamlRoot() : nullptr;
+        POINT cursor, local;
+        if (!root || !GetCursorPos(&cursor)) {
+            return;
+        }
+        HWND island = IslandAt(cursor, &local);
+        double scale = root.RasterizationScale();
+        auto position = args.GetCurrentPoint(nullptr).Position();
+        if (island && scale > 0 && std::abs(local.x / scale - position.X) <= 2 &&
+            std::abs(local.y / scale - position.Y) <= 2) {
+            window.island = island;
+        }
+    } catch (...) {
+    }
+}
+
+// Whether the mouse cursor is over the window's sidebar right now. Worked out
+// from the cursor itself, not from pointer events: those bubble up from every
+// child the pointer crosses, and a fast exit off the window's edge can arrive
+// with the last position still inside, or not at all.
+bool PointerOverSidebar(WindowState const& window) {
+#ifdef WTVT_TEST_HOOKS
+    if (int over = g_testPointerOver; over >= 0) {
+        return over == 1;
+    }
+#endif
+    try {
+        auto tabRow = window.tabRow.get();
+        auto root = tabRow ? tabRow.XamlRoot() : nullptr;
+        POINT cursor, local;
+        if (!root || !GetCursorPos(&cursor)) {
+            return false;
+        }
+        HWND island = IslandAt(cursor, &local);
+        double scale = root.RasterizationScale();
+        if (!island || scale <= 0) {
+            return false;
+        }
+        if (window.island) {
+            if (island != window.island) {
+                return false;
+            }
+        } else {
+            // Not recorded yet: at least the island must be the size of this
+            // XAML root.
+            RECT client;
+            auto size = root.Size();
+            if (!GetClientRect(island, &client) ||
+                std::abs(client.right / scale - size.Width) > 2 ||
+                std::abs(client.bottom / scale - size.Height) > 2) {
+                return false;
+            }
+        }
+        auto bounds = tabRow.TransformToVisual(nullptr).TransformBounds(
+            wf::Rect{0, 0, static_cast<float>(tabRow.ActualWidth()),
+                     static_cast<float>(tabRow.ActualHeight())});
+        double x = local.x / scale, y = local.y / scale;
+        return x >= bounds.X && x < bounds.X + bounds.Width && y >= bounds.Y &&
+               y < bounds.Y + bounds.Height;
+    } catch (...) {
+        return false;
+    }
+}
+
+// The sidebar's own colour, if it is opaque, for the backdrop that hides the
+// terminal under a peeking rail. Otherwise the backdrop keeps its theme fill.
+wuxm::Brush OpaqueSidebarBrush(wuxc::ContentPresenter const& tabRow, muxc::TabView const& tabView) {
+    for (auto const& brush : {tabRow.Background(), tabView.Background()}) {
+        auto solid = brush.try_as<wuxm::SolidColorBrush>();
+        if (solid && solid.Color().A == 255 && solid.Opacity() >= 1.0) {
+            return solid;
+        }
+    }
+    return nullptr;
+}
+
+// Shows a collapsed window's sidebar at full width, above the terminal, or puts
+// the rail back. Only the look changes: the terminal keeps the rail's margin,
+// so it doesn't reflow, and nothing is taken out of the tree. Each step runs on
+// its own, so one failing doesn't leave the rest in the other state.
+void SetPeek(ThreadContext& context, WindowState& window, bool peek) {
+    if (window.peeking == peek) {
+        return;
+    }
+    auto tabRow = window.tabRow.get();
+    auto tabView = window.tabView.get();
+    if (!tabRow || !tabView || !window.stripApplied) {
+        window.peeking = false;
+        return;
+    }
+
+    LARGE_INTEGER started, finished, frequency;
+    QueryPerformanceCounter(&started);
+    window.peeking = peek;
+    Guarded(L"Peek: width", [&] {
+        SetValueSaved(window, tabRow, wux::FrameworkElement::WidthProperty(),
+                      winrt::box_value(SidebarWidth(window)));
+    });
+    // The terminal and the info bars go behind the sidebar; overlays such as
+    // the command palette stay above it.
+    Guarded(L"Peek: order", [&] {
+        for (auto const& [weakElement, original] : window.shiftedContent) {
+            if (auto element = weakElement.get()) {
+                if (peek) {
+                    SetValueSaved(window, element, wuxc::Canvas::ZIndexProperty(),
+                                  winrt::box_value(-1));
+                } else {
+                    RestoreSavedValue(window, element, wuxc::Canvas::ZIndexProperty());
+                }
+            }
+        }
+    });
+    Guarded(L"Peek: backdrop", [&] {
+        if (auto backdrop = window.peekBackdrop.get()) {
+            if (peek) {
+                if (auto inner = backdrop.Child().try_as<wuxc::Border>()) {
+                    inner.Background(OpaqueSidebarBrush(tabRow, tabView));
+                }
+                if (window.peekBackdropPlain) {
+                    bool light = tabRow.ActualTheme() == wux::ElementTheme::Light;
+                    backdrop.Background(wuxm::SolidColorBrush(
+                        light ? winrt::Windows::UI::ColorHelper::FromArgb(255, 243, 243, 243)
+                              : winrt::Windows::UI::ColorHelper::FromArgb(255, 32, 32, 32)));
+                }
+                backdrop.BorderThickness(g_sidebarOnRight ? wux::Thickness{1, 0, 0, 0}
+                                                          : wux::Thickness{0, 0, 1, 0});
+            }
+            backdrop.Visibility(peek ? wux::Visibility::Visible : wux::Visibility::Collapsed);
+        }
+    });
+    Guarded(L"Peek: footer", [&] { StyleFooter(window); });
+    Guarded(L"Peek: collapse button", [&] {
+        if (auto button = window.collapseButton.get()) {
+            StyleCollapseButton(window, button);
+        }
+    });
+    Guarded(L"Peek: new-tab button", [&] {
+        if (auto button = window.newTabButton.get()) {
+            FitNewTabButton(window, button);
+        }
+    });
+    Guarded(L"Peek: tabs", [&] { ApplyCurrentTabTemplate(context, window, tabView); });
+    Guarded(L"Peek: list height", [&] { FitTabListHeight(window); });
+    QueryPerformanceCounter(&finished);
+    QueryPerformanceFrequency(&frequency);
+    Wh_Log(L"Peek %s: %u tabs in %.1f ms", peek ? L"open" : L"closed", tabView.TabItems().Size(),
+           (finished.QuadPart - started.QuadPart) * 1000.0 / frequency.QuadPart);
+}
+
+// A menu of this window is open. Tooltips don't count: every tab has one, and
+// a tooltip left behind by a fast exit would otherwise hold the peek open.
+bool AnyPopupOpen(WindowState const& window) {
+    try {
+        auto tabRow = window.tabRow.get();
+        auto root = tabRow ? tabRow.XamlRoot() : nullptr;
+        if (!root) {
+            return false;
+        }
+        for (auto const& popup : wuxm::VisualTreeHelper::GetOpenPopupsForXamlRoot(root)) {
+            if (!popup.Child().try_as<wuxc::ToolTip>()) {
+                return true;
+            }
+        }
+    } catch (...) {
+    }
+    return false;
+}
+
+void OnPeekTimer(winrt::weak_ref<muxc::TabView> const& weakTabView);
+
+void SchedulePeekCheck(WindowState& window, int delayMs) {
+    if (!window.peekTimer) {
+        auto queue = ws::DispatcherQueue::GetForCurrentThread();
+        if (!queue) {
+            return;
+        }
+        window.peekTimer = queue.CreateTimer();
+        window.peekTimer.IsRepeating(false);
+        window.peekTimerToken = window.peekTimer.Tick(
+            [weakTabView = window.tabView](ws::DispatcherQueueTimer const&, wf::IInspectable const&) {
+                OnPeekTimer(weakTabView);
+            });
+    }
+    window.peekTimer.Interval(std::chrono::milliseconds{delayMs});
+    window.peekTimer.Start();
+}
+
+void StopPeekTimer(WindowState& window) {
+    if (auto timer = std::exchange(window.peekTimer, nullptr)) {
+        timer.Stop();
+        timer.Tick(std::exchange(window.peekTimerToken, {}));
+    }
+}
+
+// The mouse entered or left the sidebar, or crossed between its children. The
+// event only prompts a look at where the cursor is (see OnPeekTimer).
+void OnSidebarPointer(WindowState& window, bool entered) {
+    if (!window.collapsed) {
+        return;
+    }
+    if (!entered && !PointerOverSidebar(window)) {
+        window.suppressPeek = false;  // it has left since the collapse
+    }
+    SchedulePeekCheck(window, entered && !window.peeking ? kPeekOpenDelayMs : kPeekCloseDelayMs);
+}
+
+WindowState* FindWindowByTabView(ThreadContext& context, muxc::TabView const& tabView);
+
+void OnPeekTimer(winrt::weak_ref<muxc::TabView> const& weakTabView) {
+    auto context = GetThreadContext(false);
+    auto tabView = weakTabView.get();
+    auto window = context && tabView ? FindWindowByTabView(*context, tabView) : nullptr;
+    if (!g_active || !window || !window->layoutApplied) {
+        return;
+    }
+    // Nothing changes while a tab is dragged: re-templating the tabs would pull
+    // the dragged one out from under the pointer. A drag whose completion never
+    // arrived ends when no mouse button is down (physical buttons, so either).
+    if (window->dragging && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000) &&
+        !(GetAsyncKeyState(VK_RBUTTON) & 0x8000)) {
+        window->dragging = false;
+    }
+    if (window->dragging) {
+        SchedulePeekCheck(*window, kPeekPollMs);
+        return;
+    }
+    bool over = PointerOverSidebar(*window);
+    if (!over) {
+        window->suppressPeek = false;
+    }
+    bool want = window->collapsed && over && !window->suppressPeek &&
+                tabView.Visibility() == wux::Visibility::Visible;
+    if (window->peeking && !want) {
+        // Stay open while a tab's menu or the new-tab menu is open, or a tab is
+        // being dragged, and for a moment after the mouse leaves, so a brief
+        // stray outside doesn't snap it shut.
+        ULONGLONG now = GetTickCount64();
+        if (!window->leftAt) {
+            window->leftAt = now;
+        }
+        if (AnyPopupOpen(*window) ||
+            now - window->leftAt < static_cast<ULONGLONG>(kPeekCloseDelayMs)) {
+            SchedulePeekCheck(*window, kPeekPollMs);
+            return;
+        }
+    }
+    window->leftAt = 0;
+    if (want != window->peeking) {
+        Guarded(L"Peeking", [&] { SetPeek(*context, *window, want); });
+    }
+    if (window->peeking) {
+        // Keep looking while open: leaving the window fast may raise no event.
+        SchedulePeekCheck(*window, kPeekPollMs);
+    }
+}
+
+bool IsMouse(wuxi::PointerRoutedEventArgs const& args) {
+    return args.Pointer().PointerDeviceType() ==
+           winrt::Windows::Devices::Input::PointerDeviceType::Mouse;
+}
+
+void AddPointerHandlers(WindowState& window, wuxc::ContentPresenter const& tabRow) {
+    if (window.pointerEnteredHandler) {
+        return;
+    }
+    auto weakTabView = window.tabView;
+    // Handled events too: the tabs and buttons inside mark theirs handled.
+    // Mouse only: a touch or pen tap would open a rail nothing would close; the
+    // collapse button expands it for those.
+    auto handler = [weakTabView](bool entered) {
+        return winrt::box_value(wuxi::PointerEventHandler(
+            [weakTabView, entered](wf::IInspectable const&, wuxi::PointerRoutedEventArgs const& args) {
+                if (!g_active || !IsMouse(args)) {
+                    return;
+                }
+                auto context = GetThreadContext(false);
+                auto tabView = weakTabView.get();
+                auto window = context && tabView ? FindWindowByTabView(*context, tabView) : nullptr;
+                if (window && window->layoutApplied) {
+                    if (entered) {
+                        RecordIsland(*window, args);
+                    }
+                    OnSidebarPointer(*window, entered);
+                }
+            }));
+    };
+    window.pointerEnteredHandler = handler(true);
+    window.pointerExitedHandler = handler(false);
+    tabRow.AddHandler(wux::UIElement::PointerEnteredEvent(), window.pointerEnteredHandler, true);
+    tabRow.AddHandler(wux::UIElement::PointerExitedEvent(), window.pointerExitedHandler, true);
+
+    // A peek never closes under a tab being dragged: re-templating the tabs
+    // mid-drag would pull the dragged tab out from under the pointer.
+    if (auto tabView = window.tabView.get()) {
+        window.dragStartingToken = tabView.TabDragStarting(
+            [](muxc::TabView const& sender, muxc::TabViewTabDragStartingEventArgs const&) {
+                auto context = GetThreadContext(false);
+                if (auto window = context ? FindWindowByTabView(*context, sender) : nullptr) {
+                    window->dragging = true;
+                }
+            });
+        window.dragCompletedToken = tabView.TabDragCompleted(
+            [](muxc::TabView const& sender, muxc::TabViewTabDragCompletedEventArgs const&) {
+                auto context = GetThreadContext(false);
+                if (auto window = context ? FindWindowByTabView(*context, sender) : nullptr) {
+                    window->dragging = false;
+                    if (window->peeking) {
+                        SchedulePeekCheck(*window, kPeekCloseDelayMs);
+                    }
+                }
+            });
+    }
+}
+
+void RemovePointerHandlers(WindowState& window) {
+    Guarded(L"Stopping the peek timer", [&] { StopPeekTimer(window); });
+    auto tabRow = window.tabRow.get();
+    Guarded(L"Removing the pointer handlers", [&] {
+        if (tabRow && window.pointerEnteredHandler) {
+            tabRow.RemoveHandler(wux::UIElement::PointerEnteredEvent(), window.pointerEnteredHandler);
+            tabRow.RemoveHandler(wux::UIElement::PointerExitedEvent(), window.pointerExitedHandler);
+        }
+    });
+    Guarded(L"Removing the drag handlers", [&] {
+        auto tabView = window.tabView.get();
+        if (tabView && window.dragStartingToken) {
+            tabView.TabDragStarting(window.dragStartingToken);
+        }
+        if (tabView && window.dragCompletedToken) {
+            tabView.TabDragCompleted(window.dragCompletedToken);
+        }
+    });
+    window.pointerEnteredHandler = nullptr;
+    window.pointerExitedHandler = nullptr;
+    window.dragStartingToken = {};
+    window.dragCompletedToken = {};
+    window.peeking = false;
+    window.dragging = false;
+    window.leftAt = 0;
 }
 
 WindowState* FindWindowState(ThreadContext& context,
@@ -1814,6 +2501,7 @@ void ApplyLayout(ThreadContext& context, WindowState& window) {
     }
 
     ApplySidebarLayout(window);
+    AddPointerHandlers(window, tabRow);
 
     if (!window.tabViewVisibilityToken) {
         window.tabViewVisibilityToken = tabView.RegisterPropertyChangedCallback(
@@ -1825,6 +2513,10 @@ void ApplyLayout(ThreadContext& context, WindowState& window) {
                 }
                 for (auto& window : context->windows) {
                     if (window->layoutApplied && window->tabView.get() == sender) {
+                        if (window->peeking &&
+                            sender.as<wux::UIElement>().Visibility() != wux::Visibility::Visible) {
+                            Guarded(L"Closing the peek", [&] { SetPeek(*context, *window, false); });
+                        }
                         UpdateContentMargins(*window);
                     }
                 }
@@ -1898,6 +2590,8 @@ void RemoveLayout(WindowState& window) {
     auto tabRow = window.tabRow.get();
     auto tabView = window.tabView.get();
     auto pageRoot = window.pageRoot.get();
+
+    RemovePointerHandlers(window);
 
     Guarded(L"Revoking the visibility callback", [&] {
         if (tabView && window.tabViewVisibilityToken) {
@@ -2051,6 +2745,32 @@ void RunPendingWork(ThreadContext& context) {
     }
 
 #ifdef WTVT_TEST_HOOKS
+    if (int entered = std::exchange(context.pendingTestPointer, -1); entered == 2) {
+        g_testPointerOver = -1;  // back to the real cursor
+    } else if (entered >= 0) {
+        g_testPointerOver = entered;
+        for (auto& window : context.windows) {
+            if (window->layoutApplied) {
+                OnSidebarPointer(*window, entered == 1);
+            }
+        }
+    }
+    if (std::exchange(context.pendingTestReport, false)) {
+        Wh_Log(L"TEST diagnostics advised: %d", DiagnosticsAdvisedForTest());
+    }
+    if (std::exchange(context.pendingTestClosePopups, false)) {
+        for (auto& window : context.windows) {
+            Guarded(L"Closing test popups", [&] {
+                auto tabRow = window->tabRow.get();
+                auto root = tabRow ? tabRow.XamlRoot() : nullptr;
+                if (root) {
+                    for (auto const& popup : wuxm::VisualTreeHelper::GetOpenPopupsForXamlRoot(root)) {
+                        popup.IsOpen(false);
+                    }
+                }
+            });
+        }
+    }
     if (int index = std::exchange(context.pendingTestMenuTab, -1); index >= 0) {
         Guarded(L"Opening a test menu", [&] {
             for (auto& window : context.windows) {
@@ -2125,6 +2845,12 @@ void RunPendingWork(ThreadContext& context) {
         Wh_SetIntValue(L"collapsed", collapsed);
         Wh_Log(L"Window %s", window->collapsed ? L"collapsed" : L"expanded");
         RefreshWindow(context, *window);
+        // With the mouse on the button that collapsed the rail, don't open it
+        // again under the mouse until the mouse has left once.
+        if (auto tabRow = window->tabRow.get()) {
+            Guarded(L"Laying out the rail", [&] { tabRow.UpdateLayout(); });
+        }
+        window->suppressPeek = collapsed && PointerOverSidebar(*window);
     }
 
     if (toggleVertical) {
@@ -2166,6 +2892,24 @@ LRESULT CALLBACK TestGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code == HC_ACTION && wParam == PM_REMOVE && message->message == TestMessage()) {
         if (auto context = GetThreadContext(false)) {
             context->pendingTestMenuTab = static_cast<int>(message->wParam);
+            QueueWork();
+        }
+    }
+    if (code == HC_ACTION && wParam == PM_REMOVE && message->message == TestPointerMessage()) {
+        if (auto context = GetThreadContext(false)) {
+            context->pendingTestPointer = static_cast<int>(std::min<WPARAM>(message->wParam, 2));
+            QueueWork();
+        }
+    }
+    if (code == HC_ACTION && wParam == PM_REMOVE && message->message == TestReportMessage()) {
+        if (auto context = GetThreadContext(false)) {
+            context->pendingTestReport = true;
+            QueueWork();
+        }
+    }
+    if (code == HC_ACTION && wParam == PM_REMOVE && message->message == TestClosePopupsMessage()) {
+        if (auto context = GetThreadContext(false)) {
+            context->pendingTestClosePopups = true;
             QueueWork();
         }
     }
@@ -2405,6 +3149,13 @@ class VisualTreeWatcher
     winrt::com_ptr<IXamlDiagnostics> m_diagnostics;
     winrt::com_ptr<IXamlDiagnosticsTestHooks> m_testHooks;
 };
+
+#ifdef WTVT_TEST_HOOKS
+int DiagnosticsAdvisedForTest() {
+    auto watcher = CurrentWatcher();
+    return watcher ? watcher->IsAdvised() : -1;
+}
+#endif
 
 // The diagnostics detach once no tab row has turned up for this long.
 constexpr ULONGLONG kDetachAfterQuietMs = 5000;

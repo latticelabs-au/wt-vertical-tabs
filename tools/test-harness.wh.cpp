@@ -235,6 +235,28 @@ using SwitchToThisWindow_t = void(WINAPI*)(HWND, BOOL);
 SwitchToThisWindow_t SwitchToThisWindow_Original;
 void WINAPI SwitchToThisWindow_Hook(HWND, BOOL) {}
 
+// When a wt.exe command line reaches an existing window, Terminal "summons" it:
+// it attaches its input to the foreground thread's and calls SetActiveWindow,
+// which makes it the foreground window (and switches virtual desktops) past the
+// foreground lock. Neither may happen in a test Terminal.
+using AttachThreadInput_t = decltype(&AttachThreadInput);
+AttachThreadInput_t AttachThreadInput_Original;
+BOOL WINAPI AttachThreadInput_Hook(DWORD attach, DWORD attachTo, BOOL doAttach) {
+    if (doAttach) {
+        return TRUE;
+    }
+    return AttachThreadInput_Original(attach, attachTo, doAttach);
+}
+
+using SetActiveWindow_t = decltype(&SetActiveWindow);
+SetActiveWindow_t SetActiveWindow_Original;
+HWND WINAPI SetActiveWindow_Hook(HWND window) {
+    if (window && !(GetWindowLongW(window, GWL_STYLE) & WS_CHILD)) {
+        return GetActiveWindow();
+    }
+    return SetActiveWindow_Original(window);
+}
+
 BOOL Wh_ModInit() {
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     Wh_SetFunctionHook((void*)CreateWindowExW, (void*)CreateWindowExW_Hook,
@@ -254,6 +276,10 @@ BOOL Wh_ModInit() {
                        (void**)&SetForegroundWindow_Original);
     Wh_SetFunctionHook((void*)BringWindowToTop, (void*)BringWindowToTop_Hook,
                        (void**)&BringWindowToTop_Original);
+    Wh_SetFunctionHook((void*)AttachThreadInput, (void*)AttachThreadInput_Hook,
+                       (void**)&AttachThreadInput_Original);
+    Wh_SetFunctionHook((void*)SetActiveWindow, (void*)SetActiveWindow_Hook,
+                       (void**)&SetActiveWindow_Original);
     if (auto switchToThisWindow = GetProcAddress(user32, "SwitchToThisWindow")) {
         Wh_SetFunctionHook((void*)switchToThisWindow, (void*)SwitchToThisWindow_Hook,
                            (void**)&SwitchToThisWindow_Original);

@@ -87,6 +87,10 @@ Against a portable Terminal 1.24 with the mod loaded through a scoped portable W
 - [ ] Collapse and expand; the new-tab dropdown arrow comes back after expanding
 - [ ] With three windows, collapsing one leaves the others expanded, and a new window starts the
       way the last one was left
+- [ ] With a real mouse on a collapsed rail: it peeks open after a moment without moving the
+      terminal, closes when the mouse leaves (including a fast flick off the window's edge), stays
+      open while a tab's menu is open, and a touch tap doesn't open it
+- [ ] The new-tab button sits right under the last tab, and stays in view with 100 tabs
 - [ ] Toggle state and collapsed state survive a restart
 - [ ] "Show tabs in title bar" on and off, light and dark theme
 - [ ] Focus mode and full screen hide the sidebar; with "Always show tabs" off, one tab hides it

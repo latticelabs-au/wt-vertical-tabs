@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.1] - 2026-09-29
+## [1.1.0] - 2026-09-29
+
+### Added
+
+- Hover to peek: resting the mouse on a collapsed rail opens it to full width over the terminal,
+  without moving or reflowing the terminal, and it closes when the mouse leaves. It stays open while
+  a tab's menu or the new-tab menu is open, or a tab is being dragged. Mouse only.
+- The new-tab button now sits right under the last tab, as in a browser. Once the list fills the
+  sidebar it scrolls, with the button still in view at the foot. Its dropdown opens towards the free
+  space.
 
 ### Fixed
 
@@ -34,6 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/latticelabs-au/wt-vertical-tabs/compare/v1.0.1...HEAD
-[1.0.1]: https://github.com/latticelabs-au/wt-vertical-tabs/compare/v1.0.0...v1.0.1
+[Unreleased]: https://github.com/latticelabs-au/wt-vertical-tabs/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/latticelabs-au/wt-vertical-tabs/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/latticelabs-au/wt-vertical-tabs/releases/tag/v1.0.0

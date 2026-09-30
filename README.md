@@ -35,12 +35,17 @@ works on Terminal's live interface, in memory, while it runs.
   context menu, in a group of their own above Close. Horizontal stays the default, and the choice is
   remembered across restarts.
 - **Collapsible sidebar, per window.** The pane button at the top of the sidebar collapses that
-  window's sidebar to a 48 px icon rail and expands it again; other windows stay as they are. Titles
-  stay available as tooltips. New windows, and every window after a restart (or after the mod is
-  disabled and enabled again), start the way you last left one.
+  window's sidebar to a 48 px icon rail and expands it again; other windows stay as they are. New
+  windows, and every window after a restart (or after the mod is disabled and enabled again), start
+  the way you last left one.
+- **Hover to peek.** Rest the mouse on a collapsed rail and it opens to full width over the terminal,
+  the way Edge does it, then closes when the mouse leaves. The terminal doesn't move or reflow. A
+  sidebar you have expanded stays put.
+- **New tab right under the tabs.** The **+** button follows the last tab, as in a browser; once the
+  list fills the sidebar it scrolls and **+** stays in view at the foot.
 - **Terminal keeps working as before.** Tab colours, renaming, the tab context menu, the new-tab
-  dropdown (it opens upwards from the foot of the sidebar), focus mode, full screen, multiple windows,
-  light and dark themes.
+  dropdown (it opens towards the free space: down, or up when **+** is low in the window), focus
+  mode, full screen, multiple windows, light and dark themes.
 - **Title bar on or off.** With "Show tabs in title bar" on, the title bar keeps the window buttons and
   becomes a plain drag area, like Edge in vertical tab mode. With it off, the normal Windows title bar
   stays and shows the active tab's title.
@@ -108,10 +113,19 @@ covered under the caveats.
 
 **Making it vertical.** The tab row moves out of the title bar into a column beside the terminal, and
 the stock `TabView` template is rearranged in place. Its column definitions become rows (collapse
-button, header, tab list, new-tab button), the list's `ItemsStackPanel` turns vertical, horizontal
-scrolling is switched off, and each tab gets a row-shaped template. The template is rearranged
-rather than replaced because the tab list owns the tab items, and moving live items from one list to
-another fails inside XAML.
+button, header, tab list, new-tab button, and the rest of the height), the list's `ItemsStackPanel`
+turns vertical, horizontal scrolling is switched off, and each tab gets a row-shaped template. The
+list's row sizes to its tabs, so the new-tab button follows the last one; the list's maximum height
+is kept to what the other rows leave, so a long list scrolls with the button still in view. The
+template is rearranged rather than replaced because the tab list owns the tab items, and moving live
+items from one list to another fails inside XAML.
+
+**Peeking.** A collapsed rail opens over the terminal rather than beside it: the sidebar widens, the
+terminal and the info bars drop behind it (overlays such as the command palette stay on top), and an
+opaque backdrop the mod adds to the strip hides the terminal underneath. The terminal keeps the
+rail's margin, so it never reflows. Whether the mouse is over the sidebar comes from the cursor
+position, checked while the rail is open, not from pointer events alone: those bubble up from every
+tab and button the pointer crosses, and a fast exit off the window's edge can go unreported.
 
 **The width fight.** `TabView::UpdateTabWidths` is written for a horizontal strip: it gives tabs fixed
 widths, and turns horizontal scrolling back on when they do not fit. It only does that when width is
@@ -143,10 +157,11 @@ every handler the mod adds is removed on the UI thread that owns it.
 | Right-click a tab, **Turn on vertical tabs** | Tabs move into the sidebar. |
 | Right-click a tab, **Turn off vertical tabs** | Terminal's own horizontal strip, exactly as before. |
 | Pane button at the top of the sidebar | Collapse this window's sidebar to the icon rail, or expand it again. |
-| Hover a tab in the collapsed rail | Its title, as a tooltip. |
-| Dropdown arrow next to **+** | Terminal's new-tab menu, opening upwards. The collapsed rail keeps only **+**. |
+| Rest the mouse on the collapsed rail | It opens over the terminal, with titles, until the mouse leaves. The terminal doesn't move. |
+| **+** under the last tab | A new tab. |
+| Dropdown arrow next to **+** | Terminal's new-tab menu, opening towards the free space. The collapsed rail keeps only **+**. |
 
-<p align="center"><img src="docs/images/collapsed.png" alt="Collapsed icon rail" width="400"> <img src="docs/images/menu.png" alt="Tab context menu with the toggle" width="340"></p>
+<p align="center"><img src="docs/images/collapsed.png" alt="Collapsed icon rail" width="230"> <img src="docs/images/peek.png" alt="The collapsed rail peeking open over the terminal on hover" width="352"> <img src="docs/images/menu.png" alt="Tab context menu with the toggle" width="253"></p>
 
 ---
 
@@ -181,6 +196,9 @@ context menu without real mouse input. Never install either into the Terminal yo
 ---
 
 ## ⚠️ Caveats and known limits
+
+**Peeking is mouse only.** A touch or pen tap on the collapsed rail doesn't open it, because nothing
+would close it again; use the pane button to expand the sidebar.
 
 **Arrow keys inside the tab list do not move between tabs.** WinUI's `TabView` cancels Up and Down
 focus movement between tabs, as a workaround for overlapping horizontal tabs. Switching tabs with
